@@ -21,6 +21,16 @@ struct CopilotContent: View {
         List(selection: $selection) {
             Section {
                 Toggle("连续作战", isOn: $useCopilotQueue)
+                if useCopilotQueue {
+                    Toggle(
+                        "漏怪时退出并重试",
+                        isOn: Binding(
+                            get: { viewModel.copilotDefaults.retry_on_leak ?? false },
+                            set: { viewModel.copilotDefaults.retry_on_leak = $0 }
+                        )
+                    )
+                        .help("检测到目标生命降低时退出当前作战，并重试一次。允许战术漏怪的作业请勿启用。")
+                }
             }
 
             if useCopilotQueue {

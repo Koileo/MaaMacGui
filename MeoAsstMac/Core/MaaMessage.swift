@@ -481,6 +481,9 @@ extension MAAViewModel {
             // TODO: b
             break
 
+        case "CopilotBattleLeakDetected":
+            logInfo("检测到漏怪，正在退出当前作战并重试")
+
         case "SSSStage":
             if let stage = subTaskDetails["stage"].string {
                 logInfo("CurrentStage \(stage)")

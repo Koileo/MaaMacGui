@@ -23,6 +23,7 @@ struct RegularCopilotConfiguration: Codable, Hashable {
     var loop_times = 1
 
     var use_sanity_potion = false
+    var retry_on_leak: Bool?
 
     var formation = false
     var formation_index = 0
