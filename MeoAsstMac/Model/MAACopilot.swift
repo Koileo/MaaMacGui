@@ -50,6 +50,10 @@ extension MAACopilot.Operator: CustomStringConvertible {
 }
 
 extension MAACopilot {
+    var navigationStageName: String {
+        Self.stageCodes[stage_name] ?? Self.fallbackNavigationStageName(for: stage_name)
+    }
+
     init?(url: URL) {
         do {
             let data = try Data(contentsOf: url)
@@ -57,5 +61,29 @@ extension MAACopilot {
         } catch {
             return nil
         }
+    }
+
+    private struct StageCode: Decodable {
+        let code: String
+        let stageId: String
+    }
+
+    private static let stageCodes: [String: String] = {
+        guard let url = Bundle.main.resourceURL?
+            .appendingPathComponent("resource/stages.json"),
+            let data = try? Data(contentsOf: url),
+            let stages = try? JSONDecoder().decode([StageCode].self, from: data)
+        else { return [:] }
+
+        return Dictionary(stages.map { ($0.stageId, $0.code) }, uniquingKeysWith: { first, _ in first })
+    }()
+
+    private static func fallbackNavigationStageName(for stageName: String) -> String {
+        guard stageName.hasPrefix("main_") else { return stageName }
+
+        let value = String(stageName.dropFirst("main_".count))
+        let parts = value.split(separator: "-", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let chapter = Int(parts[0]) else { return stageName }
+        return "\(chapter)-\(parts[1])"
     }
 }

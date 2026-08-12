@@ -93,6 +93,8 @@ import SwiftUI
     }
 
     @Published var copilot: CopilotConfiguration?
+    @Published var copilotDefaults = RegularCopilotConfiguration(copilotList: [])
+    @AppStorage("MAACopilotDefaults") private var serializedCopilotDefaults: String?
     @Published var downloadCopilot: String?
     @Published var showImportCopilot = false
     @Published var copilotDetailMode: CopilotDetailMode = .log
@@ -187,12 +189,43 @@ import SwiftUI
         $status.sink(receiveValue: switchAwakeGuard).store(in: &cancellables)
 
         initScheduledDailyTaskTimer()
+        initCopilotDefaults()
     }
 
     deinit {
         messageTask?.cancel()
         Self.releaseAssertion(awakeAssertionID)
         Self.releaseAssertion(wakeupAssertionID)
+    }
+}
+
+// MARK: - Copilot Defaults
+
+extension MAAViewModel {
+    private func initCopilotDefaults() {
+        if let serializedCopilotDefaults,
+            let defaults = JSONHelper.json(from: serializedCopilotDefaults, of: RegularCopilotConfiguration.self)
+        {
+            copilotDefaults = defaults
+        }
+
+        $copilotDefaults
+            .dropFirst()
+            .sink { [weak self] defaults in
+                guard let self,
+                    let data = try? JSONEncoder().encode(defaults),
+                    let json = String(data: data, encoding: .utf8)
+                else { return }
+                self.serializedCopilotDefaults = json
+            }
+            .store(in: &cancellables)
+    }
+
+    func regularCopilotConfiguration(filename: String? = nil) -> RegularCopilotConfiguration {
+        var configuration = copilotDefaults
+        configuration.filename = filename
+        configuration.copilot_list = []
+        return configuration
     }
 }
 

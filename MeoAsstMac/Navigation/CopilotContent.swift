@@ -12,11 +12,65 @@ struct CopilotContent: View {
     @Binding var selection: URL?
 
     @State private var copilots = Set<URL>()
+    @State private var copilotQueue = [URL]()
+    @State private var useCopilotQueue = false
     @State private var downloading = false
     @State private var expanded = false
 
     var body: some View {
         List(selection: $selection) {
+            Section {
+                Toggle("连续作战", isOn: $useCopilotQueue)
+            }
+
+            if useCopilotQueue {
+                Section("战斗列表（从关卡地图开始）") {
+                    if copilotQueue.isEmpty {
+                        Text("请从下方选择作业并点按添加")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ForEach(Array(copilotQueue.enumerated()), id: \.element) { index, url in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(MAACopilot(url: url)?.navigationStageName ?? url.lastPathComponent)
+                                Text(url.lastPathComponent)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Button {
+                                moveQueuedCopilot(at: index, offset: -1)
+                            } label: {
+                                Image(systemName: "chevron.up")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("上移")
+                            .disabled(index == copilotQueue.startIndex)
+
+                            Button {
+                                moveQueuedCopilot(at: index, offset: 1)
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("下移")
+                            .disabled(index == copilotQueue.index(before: copilotQueue.endIndex))
+
+                            Button {
+                                copilotQueue.remove(at: index)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("从战斗列表移除")
+                        }
+                    }
+                }
+            }
+
             DisclosureGroup(isExpanded: $expanded) {
                 ForEach(bundledCopilots, id: \.self) { url in
                     Text(url.lastPathComponent)
@@ -68,6 +122,20 @@ struct CopilotContent: View {
 
     @ToolbarContentBuilder private func listToolbar() -> some ToolbarContent {
         ToolbarItemGroup {
+            if useCopilotQueue {
+                Button(action: addSelectedCopilotToQueue) {
+                    Label("添加到战斗列表", systemImage: "text.badge.plus")
+                }
+                .help("添加到战斗列表")
+                .disabled(!canAddSelectedCopilotToQueue)
+
+                Button(action: { copilotQueue.removeAll() }) {
+                    Label("清空战斗列表", systemImage: "clear")
+                }
+                .help("清空战斗列表")
+                .disabled(copilotQueue.isEmpty)
+            }
+
             Button(action: deleteSelectedCopilot) {
                 Label("移除", systemImage: "trash")
             }
@@ -93,6 +161,7 @@ struct CopilotContent: View {
                     Label("开始", systemImage: "play.fill")
                 }
                 .help("开始")
+                .disabled(useCopilotQueue && copilotQueue.isEmpty)
             }
         }
     }
@@ -107,9 +176,40 @@ struct CopilotContent: View {
 
     private func start() {
         Task {
-            viewModel.copilotDetailMode = .log
-            try await viewModel.startCopilot()
+            do {
+                if useCopilotQueue {
+                    let items = copilotQueue.compactMap { url -> RegularCopilotConfiguration.CopilotItem? in
+                        guard let copilot = MAACopilot(url: url), copilot.type != "SSS" else { return nil }
+                        return .init(filename: url.path, stage_name: copilot.navigationStageName, is_raid: false)
+                    }
+
+                    guard items.count == copilotQueue.count else { return }
+
+                    var configuration = viewModel.regularCopilotConfiguration()
+                    configuration.copilot_list = items
+                    viewModel.copilot = .regular(configuration)
+                } else if let selection, MAACopilot(url: selection)?.type != "SSS" {
+                    viewModel.copilot = .regular(viewModel.regularCopilotConfiguration(filename: selection.path))
+                }
+
+                viewModel.copilotDetailMode = .log
+                try await viewModel.startCopilot()
+            } catch {
+                viewModel.logError("启动自动战斗失败：\(error.localizedDescription)")
+                viewModel.resetStatus()
+            }
         }
+    }
+
+    private func addSelectedCopilotToQueue() {
+        guard let selection, canAddSelectedCopilotToQueue else { return }
+        copilotQueue.append(selection)
+    }
+
+    private func moveQueuedCopilot(at index: Int, offset: Int) {
+        let destination = index + offset
+        guard copilotQueue.indices.contains(index), copilotQueue.indices.contains(destination) else { return }
+        copilotQueue.swapAt(index, destination)
     }
 
     private func loadUserCopilots() {
@@ -202,6 +302,15 @@ struct CopilotContent: View {
 
     private var shouldDisableDeletion: Bool {
         selection == nil || isBundled(selection)
+    }
+
+    private var canAddSelectedCopilotToQueue: Bool {
+        guard let selection,
+            !copilotQueue.contains(selection),
+            let copilot = MAACopilot(url: selection)
+        else { return false }
+
+        return copilot.type != "SSS"
     }
 
     private func isBundled(_ url: URL?) -> Bool {

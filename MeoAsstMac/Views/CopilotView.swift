@@ -14,7 +14,18 @@ struct CopilotView: View {
     var body: some View {
         if let copilot = MAACopilot(url: url) {
             VStack(spacing: 20) {
-                CopilotConfigView(config: $viewModel.copilot).padding(.top)
+                if copilot.type == "SSS" {
+                    if case .sss(let configuration) = viewModel.copilot {
+                        SSSCopilotConfigView(config: Binding {
+                            configuration
+                        } set: {
+                            viewModel.copilot = .sss($0)
+                        })
+                        .padding(.top)
+                    }
+                } else {
+                    CopilotConfigView(config: $viewModel.copilotDefaults).padding(.top)
+                }
 
                 Divider()
 
@@ -34,7 +45,7 @@ struct CopilotView: View {
         if copilot.type == "SSS" {
             viewModel.copilot = .sss(.init(filename: url.path))
         } else {
-            viewModel.copilot = .regular(.init(filename: url.path))
+            viewModel.copilot = .regular(viewModel.regularCopilotConfiguration(filename: url.path))
         }
     }
 
@@ -55,27 +66,10 @@ struct CopilotView: View {
 // MARK: - Copilot Config
 
 private struct CopilotConfigView: View {
-    @Binding var config: CopilotConfiguration?
+    @Binding var config: RegularCopilotConfiguration
 
     var body: some View {
-        switch config {
-        case .regular(let innerConfig):
-            let binding = Binding {
-                innerConfig
-            } set: { newValue in
-                self.config = .regular(newValue)
-            }
-            RegularCopilotConfigView(config: binding)
-        case .sss(let innerConfig):
-            let binding = Binding {
-                innerConfig
-            } set: { newValue in
-                self.config = .sss(newValue)
-            }
-            SSSCopilotConfigView(config: binding)
-        case .none:
-            EmptyView()
-        }
+        RegularCopilotConfigView(config: $config)
     }
 }
 
@@ -84,6 +78,9 @@ private struct RegularCopilotConfigView: View {
 
     var body: some View {
         VStack {
+            Text("默认战斗设置")
+                .font(.headline)
+            Toggle("理智不足时使用理智药", isOn: $config.use_sanity_potion)
             Toggle("自动编队", isOn: $config.formation)
             if config.formation {
                 HStack {
@@ -95,7 +92,7 @@ private struct RegularCopilotConfigView: View {
                     }
                     .pickerStyle(.menu)
                     Toggle("忽视干员属性要求", isOn: $config.ignore_requirements)
-                    Toggle("补充低信赖干员", isOn: $config.add_trust)
+                        Toggle("补充低信赖干员", isOn: $config.add_trust)
                 }
                 HStack {
                     Picker("助战模式", selection: $config.support_unit_usage) {
@@ -109,6 +106,43 @@ private struct RegularCopilotConfigView: View {
                     }
                 }
                 .animation(.default, value: config.support_unit_usage)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("指定信赖干员")
+                        Spacer()
+                        Button {
+                            config.user_additional.append(.init(name: "", skill: 1))
+                        } label: {
+                            Label("添加", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("添加指定干员")
+                    }
+
+                    ForEach(config.user_additional.indices, id: \.self) { index in
+                        HStack {
+                            TextField("干员名称", text: $config.user_additional[index].name)
+                            Picker("技能", selection: $config.user_additional[index].skill) {
+                                Text("技能 1").tag(1)
+                                Text("技能 2").tag(2)
+                                Text("技能 3").tag(3)
+                            }
+                            .frame(width: 100)
+                            Button {
+                                config.user_additional.remove(at: index)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("移除指定干员")
+                        }
+                    }
+
+                    Text("这些设置会自动用于所有普通作业和连续作战。请填写游戏内干员名称。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

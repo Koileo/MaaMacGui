@@ -10,7 +10,7 @@ import Foundation
 struct RegularCopilotConfiguration: Codable, Hashable {
     var enable = true
 
-    var filename: String
+    var filename: String?
 
     struct CopilotItem: Codable, Hashable {
         let filename: String
@@ -29,8 +29,8 @@ struct RegularCopilotConfiguration: Codable, Hashable {
     static let formationCount = 4
 
     struct UserUnit: Codable, Hashable {
-        let name: String
-        let skill: Int
+        var name: String
+        var skill: Int
     }
 
     var user_additional = [UserUnit]()
@@ -74,7 +74,7 @@ extension RegularCopilotConfiguration {
     }
 
     init(copilotList: [CopilotItem]) {
-        self.init(filename: "", copilot_list: copilotList)
+        self.init(filename: nil, copilot_list: copilotList)
     }
 }
 
