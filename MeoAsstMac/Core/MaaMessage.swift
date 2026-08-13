@@ -125,6 +125,9 @@ extension MAAViewModel {
             if let id = taskID(taskDetails: message.details) {
                 taskStatus[id] = .cancel
             }
+            if isCopilot {
+                recordCopilotRunResult(succeeded: false)
+            }
             resetStatus()
             logTrace("Stopped")
 
@@ -134,6 +137,7 @@ extension MAAViewModel {
             }
             logError("TaskError \(taskChain)")
             if isCopilot {
+                recordCopilotRunResult(succeeded: false)
                 logError("CombatError")
             }
 
@@ -168,6 +172,7 @@ extension MAAViewModel {
             logTrace("CompleteTask \(taskChain)")
 
             if isCopilot {
+                recordCopilotRunResult(succeeded: true)
                 logInfo("CompleteCombat")
             }
 

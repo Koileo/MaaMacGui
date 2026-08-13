@@ -34,6 +34,7 @@ struct CopilotContent: View {
     @AppStorage("MAAMainStoryStart") private var mainStoryStart = "main_05-01"
     @AppStorage("MAAMainStoryEnd") private var mainStoryEnd = MainStoryStage.all.last?.id ?? ""
     @State private var mainStoryProgress = ""
+    @State private var mainStoryTask: Task<Void, Never>?
     @AppStorage("MAAMainStoryBarkEndpoint") private var barkEndpoint = ""
 
     var body: some View {
@@ -214,18 +215,18 @@ struct CopilotContent: View {
         }
 
         ToolbarItemGroup {
-            switch viewModel.status {
-            case .pending:
+            switch (viewModel.status, mainStoryTask != nil) {
+            case (.pending, false):
                 Button(action: {}) {
                     ProgressView().controlSize(.small)
                 }
                 .disabled(true)
-            case .busy:
+            case (.pending, true), (.busy, _), (.idle, true):
                 Button(action: stop) {
                     Label("停止", systemImage: "stop.fill")
                 }
                 .help("停止")
-            case .idle:
+            case (.idle, false):
                 Button(action: start) {
                     Label("开始", systemImage: "play.fill")
                 }
@@ -238,23 +239,23 @@ struct CopilotContent: View {
     // MARK: - Actions
 
     private func stop() {
+        mainStoryTask?.cancel()
+        guard viewModel.status != .idle else { return }
         Task {
             try await viewModel.stop()
         }
     }
 
     private func start() {
+        if battleMode == .mainStory {
+            mainStoryTask?.cancel()
+            mainStoryTask = Task { await runMainStory() }
+            return
+        }
+
         Task {
             do {
-                if battleMode == .mainStory {
-                    let items = try await mainStoryCopilotItems()
-                    guard !items.isEmpty else { throw PRTSPlusError.noCopilot(mainStoryStart) }
-
-                    var configuration = viewModel.regularCopilotConfiguration()
-                    configuration.copilot_list = items
-                    configuration.switch_copilot_on_failure = true
-                    viewModel.copilot = .regular(configuration)
-                } else if battleMode == .queue {
+                if battleMode == .queue {
                     let urls = useAutomaticFallbacks
                         ? try await automaticFallbacks(for: copilotQueue)
                         : copilotQueue
@@ -276,21 +277,76 @@ struct CopilotContent: View {
                 viewModel.copilotDetailMode = .log
                 try await viewModel.startCopilot()
             } catch {
-                if battleMode == .mainStory,
-                    !barkEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                {
-                    do {
-                        try await BarkClient.notify(
-                            endpoint: barkEndpoint,
-                            title: "MAA 主线推进需要提升练度",
-                            body: error.localizedDescription)
-                    } catch {
-                        viewModel.logError("Bark 通知发送失败：\(error.localizedDescription)")
-                    }
-                }
                 viewModel.logError("启动自动战斗失败：\(error.localizedDescription)")
                 viewModel.resetStatus()
             }
+        }
+    }
+
+    @MainActor private func runMainStory() async {
+        do {
+            guard let start = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryStart }),
+                let end = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryEnd }),
+                start <= end
+            else {
+                throw PRTSPlusError.api("主线关卡范围无效")
+            }
+
+            let stages = Array(MainStoryStage.all[start...end])
+            let names = operatorMatchingEnabled ? ownedOperatorNames : []
+            for (index, stage) in stages.enumerated() {
+                try Task.checkCancellation()
+                mainStoryProgress = "正在获取作业：\(stage.code)（\(index + 1)/\(stages.count)）"
+                let urls = try await PRTSPlusClient.candidates(
+                    for: stage.id,
+                    ownedOperatorNames: names,
+                    limit: useAutomaticFallbacks ? 2 : 1)
+                guard !urls.isEmpty else { throw PRTSPlusError.noCopilot(stage.code) }
+
+                var configuration = viewModel.regularCopilotConfiguration()
+                configuration.copilot_list = urls.map {
+                    .init(filename: $0.path, stage_name: stage.code, is_raid: false)
+                }
+                configuration.switch_copilot_on_failure = true
+                viewModel.copilot = .regular(configuration)
+                viewModel.copilotDetailMode = .log
+                mainStoryProgress = "正在作战：\(stage.code)（\(index + 1)/\(stages.count)）"
+                try await viewModel.startCopilot()
+
+                for await status in viewModel.$status.values where status == .idle {
+                    try Task.checkCancellation()
+                    break
+                }
+                guard viewModel.lastCopilotRunSucceeded == true else {
+                    throw PRTSPlusError.api("关卡 \(stage.code) 自动战斗失败")
+                }
+            }
+
+            mainStoryProgress = "已完成 \(stages.count) 个主线关卡"
+            mainStoryTask = nil
+        } catch {
+            if Task.isCancelled {
+                mainStoryProgress = "主线推进已停止"
+                mainStoryTask = nil
+                return
+            }
+            mainStoryProgress = "主线推进已停止：\(error.localizedDescription)"
+            await notifyMainStoryFailure(error)
+            viewModel.logError("主线推进失败：\(error.localizedDescription)")
+            viewModel.resetStatus()
+            mainStoryTask = nil
+        }
+    }
+
+    @MainActor private func notifyMainStoryFailure(_ failure: Error) async {
+        guard !barkEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        do {
+            try await BarkClient.notify(
+                endpoint: barkEndpoint,
+                title: "MAA 主线推进需要处理",
+                body: failure.localizedDescription)
+        } catch {
+            viewModel.logError("Bark 通知发送失败：\(error.localizedDescription)")
         }
     }
 
@@ -371,50 +427,6 @@ struct CopilotContent: View {
             result.append(contentsOf: fallbacks)
         }
         return result
-    }
-
-    @MainActor private func mainStoryCopilotItems() async throws -> [RegularCopilotConfiguration.CopilotItem] {
-        guard let start = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryStart }),
-            let end = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryEnd }),
-            start <= end
-        else {
-            throw PRTSPlusError.api("主线关卡范围无效")
-        }
-
-        let stages = Array(MainStoryStage.all[start...end])
-        let names = operatorMatchingEnabled ? ownedOperatorNames : []
-        var items: [RegularCopilotConfiguration.CopilotItem] = []
-        for (index, stage) in stages.enumerated() {
-            mainStoryProgress = "正在获取作业：\(stage.code)（\(index + 1)/\(stages.count)）"
-            do {
-                let urls = try await PRTSPlusClient.candidates(
-                    for: stage.id,
-                    ownedOperatorNames: names,
-                    limit: useAutomaticFallbacks ? 2 : 1)
-                guard !urls.isEmpty else { throw PRTSPlusError.noCopilot(stage.code) }
-                items.append(contentsOf: urls.map {
-                    .init(filename: $0.path, stage_name: stage.code, is_raid: false)
-                })
-            } catch {
-                guard !items.isEmpty else { throw error }
-                let message = "队列将在 \(stage.code) 前停止：\(error.localizedDescription)"
-                mainStoryProgress = message
-                viewModel.logError("MainStoryBlocked")
-                if !barkEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    do {
-                        try await BarkClient.notify(
-                            endpoint: barkEndpoint,
-                            title: "MAA 主线推进发现阻塞关卡",
-                            body: message)
-                    } catch {
-                        viewModel.logError("Bark 通知发送失败：\(error.localizedDescription)")
-                    }
-                }
-                return items
-            }
-        }
-        mainStoryProgress = "已加载 \(stages.count) 个主线关卡"
-        return items
     }
 
     private func addSelectedCopilotToQueue() {

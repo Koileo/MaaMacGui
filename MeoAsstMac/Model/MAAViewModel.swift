@@ -94,6 +94,7 @@ import SwiftUI
 
     @Published var copilot: CopilotConfiguration?
     @Published var copilotDefaults = RegularCopilotConfiguration(copilotList: [])
+    @Published private(set) var lastCopilotRunSucceeded: Bool?
     @AppStorage("MAACopilotDefaults") private var serializedCopilotDefaults: String?
     @Published var downloadCopilot: String?
     @Published var showImportCopilot = false
@@ -558,6 +559,7 @@ extension MAAViewModel {
 extension MAAViewModel {
     func startCopilot() async throws {
         status = .pending
+        lastCopilotRunSucceeded = nil
         defer { handleEarlyReturn(backTo: .idle) }
 
         guard let copilot,
@@ -578,6 +580,10 @@ extension MAAViewModel {
         try await handle?.start()
 
         status = .busy
+    }
+
+    func recordCopilotRunResult(succeeded: Bool) {
+        lastCopilotRunSucceeded = succeeded
     }
 }
 
