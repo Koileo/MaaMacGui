@@ -58,6 +58,9 @@ struct CopilotContent: View {
                             Text(stage.code).tag(stage.id)
                         }
                     }
+                    Text("从所选起点开始推进；不会读取账号的历史通关记录。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     if !mainStoryProgress.isEmpty {
                         Text(mainStoryProgress)
                             .font(.caption)
