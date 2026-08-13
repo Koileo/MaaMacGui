@@ -15,6 +15,8 @@ enum PRTSPlusError: LocalizedError {
     case api(String)
     case emptyOperatorRoster
     case keychain(OSStatus)
+    case noCopilot(String)
+    case trainingRequired(String, [String])
 
     var errorDescription: String? {
         switch self {
@@ -30,6 +32,11 @@ enum PRTSPlusError: LocalizedError {
             return "未同步到任何干员数据"
         case .keychain(let status):
             return "保存到钥匙串失败（\(status)）"
+        case .noCopilot(let stage):
+            return "PRTS.plus 暂无关卡 \(stage) 的可用作业"
+        case .trainingRequired(let stage, let operators):
+            let names = operators.isEmpty ? "现有干员" : operators.joined(separator: "、")
+            return "关卡 \(stage) 暂无可直接打或仅借一名干员即可打的作业；请提升：\(names)"
         }
     }
 }
@@ -253,6 +260,11 @@ enum PRTSPlusClient {
         case missing
     }
 
+    private struct MatchEvaluation {
+        let mode: MatchMode
+        let training: [String]
+    }
+
     // MARK: - Operator roster sync
 
     static func syncOperatorNames(token: String) async throws -> Set<String> {
@@ -290,11 +302,24 @@ enum PRTSPlusClient {
     // MARK: - Fallback operations
 
     static func fallbacks(for copilot: MAACopilot, excluding: Set<Int>, ownedOperatorNames: Set<String>) async throws -> [URL] {
+        try await candidates(
+            for: copilot.stage_name,
+            excluding: excluding,
+            ownedOperatorNames: ownedOperatorNames,
+            limit: maxFallbacks)
+    }
+
+    static func candidates(
+        for stageName: String,
+        excluding: Set<Int> = [],
+        ownedOperatorNames: Set<String>,
+        limit: Int = 2
+    ) async throws -> [URL] {
         var components = URLComponents(string: "https://prts.maa.plus/copilot/query")!
         components.queryItems = [
             URLQueryItem(name: "page", value: "1"),
             URLQueryItem(name: "limit", value: "20"),
-            URLQueryItem(name: "level_keyword", value: copilot.stage_name),
+            URLQueryItem(name: "level_keyword", value: stageName),
             URLQueryItem(name: "order_by", value: "hot"),
             URLQueryItem(name: "desc", value: "true"),
             URLQueryItem(name: "type", value: "PRTS"),
@@ -326,31 +351,40 @@ enum PRTSPlusClient {
         }
 
         let ownedMap = ownedOperatorNames.isEmpty ? nil : Self.ownedOperatorMap
-        var ranked: [(id: Int, mode: MatchMode)] = []
+        var ranked: [(id: Int, mode: MatchMode, training: [String])] = []
         for summary in queryData.data {
             guard summary.available,
                 summary.type == "PRTS",
                 !excluding.contains(summary.id),
                 let content = try? JSONDecoder().decode(Content.self, from: Data(summary.content.utf8)),
-                content.stageName == copilot.stage_name
+                content.stageName == stageName
             else {
                 continue
             }
 
-            let mode = ownedMap.map { Self.matchMode(for: content, owned: $0) } ?? .ready
-            guard mode != .blocked else {
+            let evaluation = ownedMap.map { Self.matchEvaluation(for: content, owned: $0) }
+                ?? MatchEvaluation(mode: .ready, training: [])
+            guard evaluation.mode != .blocked else {
                 continue
             }
-            ranked.append((summary.id, mode))
+            ranked.append((summary.id, evaluation.mode, evaluation.training))
         }
 
         var urls: [URL] = []
-        for mode in [MatchMode.ready, .borrow, .train] {
+        for mode in [MatchMode.ready, .borrow] {
             for candidate in ranked where candidate.mode == mode {
                 urls.append(try await download(id: candidate.id))
-                if urls.count >= maxFallbacks {
+                if urls.count >= limit {
                     return urls
                 }
+            }
+        }
+        if urls.isEmpty {
+            let training = ranked
+                .filter { $0.mode == .train }
+                .flatMap(\.training)
+            if !training.isEmpty {
+                throw PRTSPlusError.trainingRequired(stageName, Array(Set(training)).sorted())
             }
         }
         return urls
@@ -553,7 +587,7 @@ enum PRTSPlusClient {
         return candidates.contains(where: { owned[normalize($0.name)] != nil }) ? .train : .missing
     }
 
-    private static func matchMode(for content: Content, owned: [String: OwnedOperator]) -> MatchMode {
+    private static func matchEvaluation(for content: Content, owned: [String: OwnedOperator]) -> MatchEvaluation {
         var missingSlots: [String] = []
         var trainingSlots: [String] = []
 
@@ -582,15 +616,38 @@ enum PRTSPlusClient {
 
         let totalSlots = (content.opers?.count ?? 0) + (content.groups?.count ?? 0)
         if totalSlots > 13 || missingSlots.count >= 2 {
-            return .blocked
+            return MatchEvaluation(mode: .blocked, training: trainingSlots)
         }
         if missingSlots.count == 1 {
-            return trainingSlots.isEmpty ? .borrow : .train
+            return MatchEvaluation(mode: trainingSlots.isEmpty ? .borrow : .train, training: trainingSlots)
         }
         if trainingSlots.isEmpty {
-            return totalSlots == 13 ? .borrow : .ready
+            return MatchEvaluation(mode: totalSlots == 13 ? .borrow : .ready, training: [])
         }
-        return .train
+        return MatchEvaluation(mode: .train, training: trainingSlots)
+    }
+}
+
+enum BarkClient {
+    static func notify(endpoint: String, title: String, body: String) async throws {
+        let value = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: value), url.scheme == "https" else {
+            throw PRTSPlusError.api("Bark 地址无效，请填写 https:// 开头的推送地址")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "title": title,
+            "body": body,
+            "group": "MAA 全主线推进",
+        ])
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw PRTSPlusError.httpStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
     }
 }
 

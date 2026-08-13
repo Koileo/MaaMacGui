@@ -9,12 +9,20 @@ import SwiftUI
 import Security
 
 struct CopilotContent: View {
+    private enum BattleMode: String, CaseIterable, Identifiable {
+        case single = "普通战斗"
+        case queue = "连续作战"
+        case mainStory = "全主线推进"
+
+        var id: Self { self }
+    }
+
     @EnvironmentObject private var viewModel: MAAViewModel
     @Binding var selection: URL?
 
     @State private var copilots = Set<URL>()
     @State private var copilotQueue = [URL]()
-    @State private var useCopilotQueue = false
+    @State private var battleMode = BattleMode.single
     @State private var useAutomaticFallbacks = false
     @State private var showOperatorSettings = false
     @State private var operatorToken = ""
@@ -23,15 +31,43 @@ struct CopilotContent: View {
     @State private var operatorSyncError: String?
     @State private var downloading = false
     @State private var expanded = false
+    @AppStorage("MAAMainStoryStart") private var mainStoryStart = "main_05-01"
+    @AppStorage("MAAMainStoryEnd") private var mainStoryEnd = MainStoryStage.all.last?.id ?? ""
+    @State private var mainStoryProgress = ""
+    @AppStorage("MAAMainStoryBarkEndpoint") private var barkEndpoint = ""
 
     var body: some View {
         List(selection: $selection) {
             Section {
-                Toggle("连续作战", isOn: $useCopilotQueue)
-                if useCopilotQueue {
+                Picker("作战模式", selection: $battleMode) {
+                    ForEach(BattleMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if battleMode == .mainStory {
+                    Picker("起始关卡", selection: $mainStoryStart) {
+                        ForEach(MainStoryStage.all) { stage in
+                            Text(stage.code).tag(stage.id)
+                        }
+                    }
+                    Picker("结束关卡", selection: $mainStoryEnd) {
+                        ForEach(MainStoryStage.all) { stage in
+                            Text(stage.code).tag(stage.id)
+                        }
+                    }
+                    if !mainStoryProgress.isEmpty {
+                        Text(mainStoryProgress)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if battleMode != .single {
                     Toggle("从 PRTS.plus 自动搜索备用作业", isOn: $useAutomaticFallbacks)
                         .help("按热度下载同关卡作业；当前作业失败或漏怪时自动切换。")
-                    if useAutomaticFallbacks {
+                    if useAutomaticFallbacks || battleMode == .mainStory {
                         Button {
                             operatorToken = OperatorRosterStore.token ?? ""
                             showOperatorSettings = true
@@ -51,7 +87,7 @@ struct CopilotContent: View {
                 }
             }
 
-            if useCopilotQueue {
+            if battleMode == .queue {
                 Section("战斗列表（从关卡地图开始）") {
                     if copilotQueue.isEmpty {
                         Text("请从下方选择作业并点按添加")
@@ -134,7 +170,11 @@ struct CopilotContent: View {
         .toolbar(content: listToolbar)
         .animation(.default, value: copilots)
         .animation(.default, value: downloading)
-        .onAppear(perform: loadUserCopilots)
+        .onAppear {
+            loadUserCopilots()
+            ownedOperatorNames = OperatorRosterStore.names
+            operatorMatchingEnabled = OperatorRosterStore.matchingEnabled
+        }
         .onDrop(of: [.fileURL], isTargeted: .none, perform: addCopilots)
         .onReceive(viewModel.$copilotDetailMode, perform: deselectCopilot)
         .onReceive(viewModel.$downloadCopilot, perform: downloadCopilot)
@@ -151,7 +191,7 @@ struct CopilotContent: View {
 
     @ToolbarContentBuilder private func listToolbar() -> some ToolbarContent {
         ToolbarItemGroup {
-            if useCopilotQueue {
+            if battleMode == .queue {
                 Button(action: addSelectedCopilotToQueue) {
                     Label("添加到战斗列表", systemImage: "text.badge.plus")
                 }
@@ -190,7 +230,7 @@ struct CopilotContent: View {
                     Label("开始", systemImage: "play.fill")
                 }
                 .help("开始")
-                .disabled(useCopilotQueue && copilotQueue.isEmpty)
+                .disabled(battleMode == .queue && copilotQueue.isEmpty)
             }
         }
     }
@@ -206,7 +246,15 @@ struct CopilotContent: View {
     private func start() {
         Task {
             do {
-                if useCopilotQueue {
+                if battleMode == .mainStory {
+                    let items = try await mainStoryCopilotItems()
+                    guard !items.isEmpty else { throw PRTSPlusError.noCopilot(mainStoryStart) }
+
+                    var configuration = viewModel.regularCopilotConfiguration()
+                    configuration.copilot_list = items
+                    configuration.switch_copilot_on_failure = true
+                    viewModel.copilot = .regular(configuration)
+                } else if battleMode == .queue {
                     let urls = useAutomaticFallbacks
                         ? try await automaticFallbacks(for: copilotQueue)
                         : copilotQueue
@@ -228,6 +276,18 @@ struct CopilotContent: View {
                 viewModel.copilotDetailMode = .log
                 try await viewModel.startCopilot()
             } catch {
+                if battleMode == .mainStory,
+                    !barkEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                {
+                    do {
+                        try await BarkClient.notify(
+                            endpoint: barkEndpoint,
+                            title: "MAA 主线推进需要提升练度",
+                            body: error.localizedDescription)
+                    } catch {
+                        viewModel.logError("Bark 通知发送失败：\(error.localizedDescription)")
+                    }
+                }
                 viewModel.logError("启动自动战斗失败：\(error.localizedDescription)")
                 viewModel.resetStatus()
             }
@@ -251,6 +311,8 @@ struct CopilotContent: View {
             if let operatorSyncError {
                 Text(operatorSyncError).foregroundStyle(.red).font(.callout)
             }
+            TextField("Bark 推送地址（https://api.day.app/设备码）", text: $barkEndpoint)
+                .textFieldStyle(.roundedBorder)
             HStack {
                 Button("清除本地数据", role: .destructive) {
                     OperatorRosterStore.clear()
@@ -309,6 +371,50 @@ struct CopilotContent: View {
             result.append(contentsOf: fallbacks)
         }
         return result
+    }
+
+    @MainActor private func mainStoryCopilotItems() async throws -> [RegularCopilotConfiguration.CopilotItem] {
+        guard let start = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryStart }),
+            let end = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryEnd }),
+            start <= end
+        else {
+            throw PRTSPlusError.api("主线关卡范围无效")
+        }
+
+        let stages = Array(MainStoryStage.all[start...end])
+        let names = operatorMatchingEnabled ? ownedOperatorNames : []
+        var items: [RegularCopilotConfiguration.CopilotItem] = []
+        for (index, stage) in stages.enumerated() {
+            mainStoryProgress = "正在获取作业：\(stage.code)（\(index + 1)/\(stages.count)）"
+            do {
+                let urls = try await PRTSPlusClient.candidates(
+                    for: stage.id,
+                    ownedOperatorNames: names,
+                    limit: useAutomaticFallbacks ? 2 : 1)
+                guard !urls.isEmpty else { throw PRTSPlusError.noCopilot(stage.code) }
+                items.append(contentsOf: urls.map {
+                    .init(filename: $0.path, stage_name: stage.code, is_raid: false)
+                })
+            } catch {
+                guard !items.isEmpty else { throw error }
+                let message = "队列将在 \(stage.code) 前停止：\(error.localizedDescription)"
+                mainStoryProgress = message
+                viewModel.logError("MainStoryBlocked")
+                if !barkEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    do {
+                        try await BarkClient.notify(
+                            endpoint: barkEndpoint,
+                            title: "MAA 主线推进发现阻塞关卡",
+                            body: message)
+                    } catch {
+                        viewModel.logError("Bark 通知发送失败：\(error.localizedDescription)")
+                    }
+                }
+                return items
+            }
+        }
+        mainStoryProgress = "已加载 \(stages.count) 个主线关卡"
+        return items
     }
 
     private func addSelectedCopilotToQueue() {
@@ -416,6 +522,7 @@ struct CopilotContent: View {
 
     private var canAddSelectedCopilotToQueue: Bool {
         guard let selection,
+            battleMode == .queue,
             !copilotQueue.contains(selection),
             let copilot = MAACopilot(url: selection)
         else { return false }

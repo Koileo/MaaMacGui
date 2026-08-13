@@ -87,3 +87,33 @@ extension MAACopilot {
         return "\(chapter)-\(parts[1])"
     }
 }
+
+struct MainStoryStage: Codable, Hashable, Identifiable {
+    let code: String
+    let stageId: String
+
+    var id: String { stageId }
+
+    static let all: [Self] = {
+        guard let url = Bundle.main.resourceURL?
+            .appendingPathComponent("resource/stages.json"),
+            let data = try? Data(contentsOf: url),
+            let stages = try? JSONDecoder().decode([Self].self, from: data)
+        else { return [] }
+
+        return stages
+            .filter {
+                $0.stageId.range(of: #"^main_[0-9]{2}-[0-9]{2}$"#, options: .regularExpression) != nil
+                    || $0.code.range(of: #"^S[0-9]+-[0-9]+$"#, options: .regularExpression) != nil
+            }
+            .sorted { sortKey($0.code).lexicographicallyPrecedes(sortKey($1.code)) }
+    }()
+
+    private static func sortKey(_ code: String) -> [Int] {
+        let isSideStage = code.hasPrefix("S")
+        let numbers = code.trimmingCharacters(in: CharacterSet.letters)
+            .split(separator: "-")
+            .compactMap { Int($0) }
+        return [numbers.first ?? Int.max, isSideStage ? 1 : 0, numbers.dropFirst().first ?? Int.max]
+    }
+}
