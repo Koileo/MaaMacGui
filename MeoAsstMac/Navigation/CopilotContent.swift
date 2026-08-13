@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Security
 
 struct CopilotContent: View {
     @EnvironmentObject private var viewModel: MAAViewModel
@@ -14,6 +15,12 @@ struct CopilotContent: View {
     @State private var copilots = Set<URL>()
     @State private var copilotQueue = [URL]()
     @State private var useCopilotQueue = false
+    @State private var useAutomaticFallbacks = false
+    @State private var showOperatorSettings = false
+    @State private var operatorToken = ""
+    @State private var ownedOperatorNames = Set<String>()
+    @State private var operatorMatchingEnabled = false
+    @State private var operatorSyncError: String?
     @State private var downloading = false
     @State private var expanded = false
 
@@ -22,6 +29,17 @@ struct CopilotContent: View {
             Section {
                 Toggle("连续作战", isOn: $useCopilotQueue)
                 if useCopilotQueue {
+                    Toggle("从 PRTS.plus 自动搜索备用作业", isOn: $useAutomaticFallbacks)
+                        .help("按热度下载同关卡作业；当前作业失败或漏怪时自动切换。")
+                    if useAutomaticFallbacks {
+                        Button {
+                            operatorToken = OperatorRosterStore.token ?? ""
+                            showOperatorSettings = true
+                        } label: {
+                            Label(operatorSettingsLabel, systemImage: "person.2")
+                        }
+                        .buttonStyle(.plain)
+                    }
                     Toggle(
                         "漏怪时退出并重试",
                         isOn: Binding(
@@ -126,6 +144,7 @@ struct CopilotContent: View {
             allowedContentTypes: [.json],
             allowsMultipleSelection: true,
             onCompletion: addCopilots)
+        .sheet(isPresented: $showOperatorSettings, content: operatorSettings)
     }
 
     // MARK: - Toolbar
@@ -188,15 +207,19 @@ struct CopilotContent: View {
         Task {
             do {
                 if useCopilotQueue {
-                    let items = copilotQueue.compactMap { url -> RegularCopilotConfiguration.CopilotItem? in
+                    let urls = useAutomaticFallbacks
+                        ? try await automaticFallbacks(for: copilotQueue)
+                        : copilotQueue
+                    let items = urls.compactMap { url -> RegularCopilotConfiguration.CopilotItem? in
                         guard let copilot = MAACopilot(url: url), copilot.type != "SSS" else { return nil }
                         return .init(filename: url.path, stage_name: copilot.navigationStageName, is_raid: false)
                     }
 
-                    guard items.count == copilotQueue.count else { return }
+                    guard items.count == urls.count else { return }
 
                     var configuration = viewModel.regularCopilotConfiguration()
                     configuration.copilot_list = items
+                    configuration.switch_copilot_on_failure = useAutomaticFallbacks
                     viewModel.copilot = .regular(configuration)
                 } else if let selection, MAACopilot(url: selection)?.type != "SSS" {
                     viewModel.copilot = .regular(viewModel.regularCopilotConfiguration(filename: selection.path))
@@ -209,6 +232,83 @@ struct CopilotContent: View {
                 viewModel.resetStatus()
             }
         }
+    }
+
+    @ViewBuilder private func operatorSettings() -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("干员匹配设置").font(.headline)
+            Text("Token 保存到系统钥匙串，仅用于直接向明日方舟一图流同步干员数据，不会发送至 PRTS.plus。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            SecureField("一图流 Token", text: $operatorToken)
+                .textFieldStyle(.roundedBorder)
+            if !ownedOperatorNames.isEmpty {
+                Toggle("启用干员匹配", isOn: $operatorMatchingEnabled)
+                Text("已导入 \(ownedOperatorNames.count) 名干员数据")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            if let operatorSyncError {
+                Text(operatorSyncError).foregroundStyle(.red).font(.callout)
+            }
+            HStack {
+                Button("清除本地数据", role: .destructive) {
+                    OperatorRosterStore.clear()
+                    operatorToken = ""
+                    ownedOperatorNames = []
+                    operatorMatchingEnabled = false
+                }
+                Spacer()
+                Button("取消") { showOperatorSettings = false }
+                Button("同步干员数据") {
+                    Task { await syncOperatorRoster() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(operatorToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+        .onAppear {
+            ownedOperatorNames = OperatorRosterStore.names
+            operatorMatchingEnabled = OperatorRosterStore.matchingEnabled
+        }
+        .onChange(of: operatorMatchingEnabled) { value in
+            OperatorRosterStore.matchingEnabled = value
+        }
+    }
+
+    private var operatorSettingsLabel: String {
+        ownedOperatorNames.isEmpty ? "干员匹配设置" : "干员匹配（\(ownedOperatorNames.count)）"
+    }
+
+    @MainActor private func syncOperatorRoster() async {
+        do {
+            let names = try await PRTSPlusClient.syncOperatorNames(token: operatorToken)
+            guard !names.isEmpty else { throw PRTSPlusError.emptyOperatorRoster }
+            try OperatorRosterStore.setToken(operatorToken)
+            OperatorRosterStore.names = names
+            OperatorRosterStore.matchingEnabled = true
+            ownedOperatorNames = names
+            operatorMatchingEnabled = true
+            operatorSyncError = nil
+        } catch {
+            operatorSyncError = error.localizedDescription
+        }
+    }
+
+    private func automaticFallbacks(for seeds: [URL]) async throws -> [URL] {
+        var result = [URL]()
+        for seed in seeds {
+            guard let copilot = MAACopilot(url: seed), copilot.type != "SSS" else { continue }
+            result.append(seed)
+            let fallbacks = try await PRTSPlusClient.fallbacks(
+                for: copilot,
+                excluding: Set(result.compactMap { Int($0.deletingPathExtension().lastPathComponent) }),
+                ownedOperatorNames: operatorMatchingEnabled ? ownedOperatorNames : [])
+            result.append(contentsOf: fallbacks)
+        }
+        return result
     }
 
     private func addSelectedCopilotToQueue() {
