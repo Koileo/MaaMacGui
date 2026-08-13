@@ -163,6 +163,34 @@ enum OperatorRosterStore {
     }
 }
 
+enum FailedCopilotStore {
+    private static let idsKey = "PRTSPlus.failedCopilotIDs"
+
+    static var ids: Set<Int> {
+        get {
+            Set(UserDefaults.standard.array(forKey: idsKey) as? [Int] ?? [])
+        }
+        set {
+            UserDefaults.standard.set(Array(newValue).sorted(), forKey: idsKey)
+        }
+    }
+
+    static func markFailed(fileName: String) {
+        let url = URL(fileURLWithPath: fileName)
+        guard url.deletingLastPathComponent().lastPathComponent == "MAA PRTS.plus",
+            let id = Int(url.deletingPathExtension().lastPathComponent)
+        else { return }
+
+        var failedIDs = ids
+        failedIDs.insert(id)
+        ids = failedIDs
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: idsKey)
+    }
+}
+
 enum PRTSPlusClient {
     private static let apiBaseURL = URL(string: "https://prts.maa.plus")!
     private static let yituliuURL = URL(string: "https://backend.yituliu.cn/open-api/operator/info")!

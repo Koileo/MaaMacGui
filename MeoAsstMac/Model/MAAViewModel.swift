@@ -95,6 +95,7 @@ import SwiftUI
     @Published var copilot: CopilotConfiguration?
     @Published var copilotDefaults = RegularCopilotConfiguration(copilotList: [])
     @Published private(set) var lastCopilotRunSucceeded: Bool?
+    var currentCopilotFileName: String?
     @AppStorage("MAACopilotDefaults") private var serializedCopilotDefaults: String?
     @Published var downloadCopilot: String?
     @Published var showImportCopilot = false
@@ -560,6 +561,7 @@ extension MAAViewModel {
     func startCopilot() async throws {
         status = .pending
         lastCopilotRunSucceeded = nil
+        currentCopilotFileName = nil
         defer { handleEarlyReturn(backTo: .idle) }
 
         guard let copilot,

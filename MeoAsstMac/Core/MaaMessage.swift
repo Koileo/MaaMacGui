@@ -138,7 +138,11 @@ extension MAAViewModel {
             logError("TaskError \(taskChain)")
             if isCopilot {
                 recordCopilotRunResult(succeeded: false)
+                if let currentCopilotFileName {
+                    FailedCopilotStore.markFailed(fileName: currentCopilotFileName)
+                }
                 logError("CombatError")
+                resetStatus()
             }
 
         case .TaskChainStart:
@@ -366,6 +370,14 @@ extension MAAViewModel {
         }
 
         switch what {
+        case "CopilotListLoadTaskFileSuccess":
+            currentCopilotFileName = subTaskDetails["file_name"].string
+
+        case "CopilotListTaskFileFailed":
+            if let fileName = subTaskDetails["file_name"].string {
+                FailedCopilotStore.markFailed(fileName: fileName)
+            }
+
         case "StageDrops":
             guard let statistics = subTaskDetails["stats"].array else {
                 return

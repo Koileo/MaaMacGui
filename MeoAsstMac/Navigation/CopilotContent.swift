@@ -29,6 +29,7 @@ struct CopilotContent: View {
     @State private var ownedOperatorNames = Set<String>()
     @State private var operatorMatchingEnabled = false
     @State private var operatorSyncError: String?
+    @State private var failedCopilotCount = 0
     @State private var downloading = false
     @State private var expanded = false
     @AppStorage("MAAMainStoryStart") private var mainStoryStart = "main_05-01"
@@ -178,6 +179,7 @@ struct CopilotContent: View {
             loadUserCopilots()
             ownedOperatorNames = OperatorRosterStore.names
             operatorMatchingEnabled = OperatorRosterStore.matchingEnabled
+            failedCopilotCount = FailedCopilotStore.ids.count
         }
         .onDrop(of: [.fileURL], isTargeted: .none, perform: addCopilots)
         .onReceive(viewModel.$copilotDetailMode, perform: deselectCopilot)
@@ -302,6 +304,7 @@ struct CopilotContent: View {
                 mainStoryProgress = "正在获取作业：\(stage.code)（\(index + 1)/\(stages.count)）"
                 let urls = try await PRTSPlusClient.candidates(
                     for: stage.id,
+                    excluding: FailedCopilotStore.ids,
                     ownedOperatorNames: names,
                     limit: useAutomaticFallbacks ? 2 : 1)
                 guard !urls.isEmpty else { throw PRTSPlusError.noCopilot(stage.code) }
@@ -355,7 +358,20 @@ struct CopilotContent: View {
 
     @ViewBuilder private func operatorSettings() -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("干员匹配设置").font(.headline)
+            Text("配队与干员匹配").font(.headline)
+            Toggle("自动编队", isOn: $viewModel.copilotDefaults.formation)
+            if viewModel.copilotDefaults.formation {
+                HStack {
+                    Picker("编队栏位", selection: $viewModel.copilotDefaults.formation_index) {
+                        Text("当前").tag(0)
+                        ForEach(0..<RegularCopilotConfiguration.formationCount, id: \.self) { index in
+                            Text("\(index + 1)").tag(index + 1)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    Toggle("忽视干员属性要求", isOn: $viewModel.copilotDefaults.ignore_requirements)
+                }
+            }
             Text("Token 保存到系统钥匙串，仅用于直接向明日方舟一图流同步干员数据，不会发送至 PRTS.plus。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -369,6 +385,18 @@ struct CopilotContent: View {
             }
             if let operatorSyncError {
                 Text(operatorSyncError).foregroundStyle(.red).font(.callout)
+            }
+            if failedCopilotCount > 0 {
+                HStack {
+                    Text("已自动跳过 \(failedCopilotCount) 个失败作业")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("重新启用") {
+                        FailedCopilotStore.clear()
+                        failedCopilotCount = 0
+                    }
+                }
             }
             TextField("Bark 推送地址（https://api.day.app/设备码）", text: $barkEndpoint)
                 .textFieldStyle(.roundedBorder)
@@ -393,6 +421,7 @@ struct CopilotContent: View {
         .onAppear {
             ownedOperatorNames = OperatorRosterStore.names
             operatorMatchingEnabled = OperatorRosterStore.matchingEnabled
+            failedCopilotCount = FailedCopilotStore.ids.count
         }
         .onChange(of: operatorMatchingEnabled) { value in
             OperatorRosterStore.matchingEnabled = value
@@ -400,7 +429,7 @@ struct CopilotContent: View {
     }
 
     private var operatorSettingsLabel: String {
-        ownedOperatorNames.isEmpty ? "干员匹配设置" : "干员匹配（\(ownedOperatorNames.count)）"
+        ownedOperatorNames.isEmpty ? "配队与干员匹配" : "配队与干员匹配（\(ownedOperatorNames.count)）"
     }
 
     @MainActor private func syncOperatorRoster() async {
