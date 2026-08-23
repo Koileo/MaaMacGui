@@ -42,6 +42,7 @@ struct MeoAsstMacApp: App {
             }
             SidebarCommands()
             TaskCommands(viewModel: appViewModel)
+            TextEditingCommands()
         }
 
         Settings {

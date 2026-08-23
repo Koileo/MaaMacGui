@@ -33,7 +33,7 @@ enum PRTSPlusError: LocalizedError {
         case .keychain(let status):
             return "保存到钥匙串失败（\(status)）"
         case .noCopilot(let stage):
-            return "PRTS.plus 暂无关卡 \(stage) 的可用作业"
+            return "PRTS.plus 当前没有符合本地筛选条件的关卡 \(stage) 作业；可尝试关闭干员匹配或重新启用失败作业"
         case .trainingRequired(let stage, let operators):
             let names = operators.isEmpty ? "现有干员" : operators.joined(separator: "、")
             return "关卡 \(stage) 暂无可直接打或仅借一名干员即可打的作业；请提升：\(names)"
@@ -104,7 +104,11 @@ enum OperatorRosterStore {
 
     static var names: Set<String> {
         get {
-            Set(UserDefaults.standard.stringArray(forKey: namesKey) ?? [])
+            let storedNames = Set(UserDefaults.standard.stringArray(forKey: namesKey) ?? [])
+            if !storedNames.isEmpty {
+                return storedNames
+            }
+            return Set(operators.map(\.name))
         }
         set {
             UserDefaults.standard.set(Array(newValue).sorted(), forKey: namesKey)
@@ -129,7 +133,10 @@ enum OperatorRosterStore {
 
     static var matchingEnabled: Bool {
         get {
-            UserDefaults.standard.bool(forKey: enabledKey)
+            if UserDefaults.standard.object(forKey: enabledKey) == nil {
+                return !operators.isEmpty
+            }
+            return UserDefaults.standard.bool(forKey: enabledKey)
         }
         set {
             UserDefaults.standard.set(newValue, forKey: enabledKey)
@@ -144,21 +151,11 @@ enum OperatorRosterStore {
     }
 
     private static func keychainQuery(merging other: [String: Any] = [:]) -> [String: Any] {
-        #if DEBUG
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        #else
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: "29V29Y67P2.com.hguandl.MeoAsstMac",
-            kSecAttrSynchronizable as String: true,
-        ]
-        #endif
         return query.merging(other, uniquingKeysWith: { $1 })
     }
 }
@@ -195,6 +192,8 @@ enum PRTSPlusClient {
     private static let apiBaseURL = URL(string: "https://prts.maa.plus")!
     private static let yituliuURL = URL(string: "https://backend.yituliu.cn/open-api/operator/info")!
     private static let maxFallbacks = 5
+    private static let queryPageSize = 100
+    private static let maxQueryResults = 500
 
     // MARK: - Responses
 
@@ -218,8 +217,39 @@ enum PRTSPlusClient {
     private struct Summary: Decodable {
         let id: Int
         let type: String
+        let uploadTime: String
+        let hotScore: Double?
         let available: Bool
         let content: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case type
+            case uploadTime = "upload_time"
+            case hotScore = "hot_score"
+            case available
+            case content
+        }
+    }
+
+    private struct SetResponse: Decodable {
+        let statusCode: Int?
+        let message: String?
+        let data: SetData?
+
+        enum CodingKeys: String, CodingKey {
+            case statusCode = "status_code"
+            case message
+            case data
+        }
+    }
+
+    private struct SetData: Decodable {
+        let copilotIds: [Int]
+
+        enum CodingKeys: String, CodingKey {
+            case copilotIds = "copilot_ids"
+        }
     }
 
     private struct GetResponse: Decodable {
@@ -242,12 +272,16 @@ enum PRTSPlusClient {
         let stageName: String
         let opers: [Operator]?
         let groups: [Group]?
+        let actions: [Action]?
 
         enum CodingKeys: String, CodingKey {
             case stageName = "stage_name"
             case opers
             case groups
+            case actions
         }
+
+        struct Action: Decodable {}
 
         struct Operator: Decodable {
             let name: String
@@ -343,12 +377,109 @@ enum PRTSPlusClient {
         ownedOperatorNames: Set<String>,
         limit: Int = 2
     ) async throws -> [URL] {
+        let requestedCode = MAACopilot.stageCodes[stageName]
+        var summaries: [Summary] = []
+        var seenIDs = Set<Int>()
+        let keywords = searchKeywords(for: stageName)
+        for keyword in keywords {
+            var page = 1
+            while page <= 5 && summaries.count < maxQueryResults {
+                let queryData = try await query(stageName: stageName, keyword: keyword, page: page)
+                guard !queryData.data.isEmpty else { break }
+                if page == 1 && !queryData.data.contains(where: { item in
+                    item.content.localizedCaseInsensitiveContains(keyword)
+                        || (requestedCode != nil && item.content.localizedCaseInsensitiveContains(requestedCode!))
+                }) {
+                    break
+                }
+                for item in queryData.data {
+                    guard seenIDs.insert(item.id).inserted else { continue }
+                    summaries.append(item)
+                }
+                page += 1
+            }
+        }
+
+        struct CandidateSummary {
+            let summary: Summary
+            let content: Content
+            let stageRank: Int
+        }
+
+        var validCandidates: [CandidateSummary] = []
+        for summary in summaries.prefix(maxQueryResults) {
+            guard summary.available,
+                summary.type == "PRTS",
+                let content = try? JSONDecoder().decode(Content.self, from: Data(summary.content.utf8)),
+                let stageRank = stageCompatibilityRank(candidate: content.stageName, requested: stageName),
+                Self.hasFormation(content)
+            else {
+                continue
+            }
+            validCandidates.append(CandidateSummary(summary: summary, content: content, stageRank: stageRank))
+        }
+
+        // If filtering out failed copilots yields no results, fall back to all valid candidates.
+        let nonExcluded = validCandidates.filter { !excluding.contains($0.summary.id) }
+        let targetCandidates = nonExcluded.isEmpty ? validCandidates : nonExcluded
+
+        let ownedMap = ownedOperatorNames.isEmpty ? nil : Self.ownedOperatorMap
+        var ranked: [(id: Int, stageRank: Int, mode: MatchMode, hotScore: Double, uploadTime: String, training: [String])] = []
+        for item in targetCandidates {
+            let evaluation = ownedMap.map { Self.matchEvaluation(for: item.content, owned: $0) }
+                ?? MatchEvaluation(mode: .ready, training: [])
+            guard evaluation.mode != .blocked else {
+                continue
+            }
+            ranked.append((item.summary.id, item.stageRank, evaluation.mode, item.summary.hotScore ?? 0, item.summary.uploadTime, evaluation.training))
+        }
+
+        ranked.sort { lhs, rhs in
+            if lhs.stageRank != rhs.stageRank {
+                return lhs.stageRank < rhs.stageRank
+            }
+            if lhs.mode != rhs.mode {
+                return lhs.mode.rawValue < rhs.mode.rawValue
+            }
+            if lhs.hotScore != rhs.hotScore {
+                return lhs.hotScore > rhs.hotScore
+            }
+            if lhs.uploadTime != rhs.uploadTime {
+                return lhs.uploadTime > rhs.uploadTime
+            }
+            return lhs.id > rhs.id
+        }
+
+        var urls: [URL] = []
+        for mode in [MatchMode.ready, .borrow] {
+            for candidate in ranked where candidate.mode == mode {
+                guard let url = try await downloadPlayable(id: candidate.id, stageName: stageName) else {
+                    continue
+                }
+                urls.append(url)
+                if urls.count >= limit {
+                    return urls
+                }
+            }
+        }
+        if urls.isEmpty {
+            let training = ranked
+                .filter { $0.mode == .train }
+                .flatMap(\.training)
+            if !training.isEmpty {
+                throw PRTSPlusError.trainingRequired(stageName, Array(Set(training)).sorted())
+            }
+        }
+        return urls
+    }
+
+    private static func query(stageName: String, keyword: String, page: Int) async throws -> QueryData {
         var components = URLComponents(string: "https://prts.maa.plus/copilot/query")!
         components.queryItems = [
-            URLQueryItem(name: "page", value: "1"),
-            URLQueryItem(name: "limit", value: "20"),
-            URLQueryItem(name: "level_keyword", value: stageName),
-            URLQueryItem(name: "order_by", value: "hot"),
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "limit", value: String(queryPageSize)),
+            URLQueryItem(name: "level_keyword", value: keyword),
+            URLQueryItem(name: "order_by", value: "hot_score"),
             URLQueryItem(name: "desc", value: "true"),
             URLQueryItem(name: "type", value: "PRTS"),
         ]
@@ -377,45 +508,102 @@ enum PRTSPlusClient {
         else {
             throw PRTSPlusError.invalidResponse
         }
+        return queryData
+    }
 
-        let ownedMap = ownedOperatorNames.isEmpty ? nil : Self.ownedOperatorMap
-        var ranked: [(id: Int, mode: MatchMode, training: [String])] = []
-        for summary in queryData.data {
-            guard summary.available,
-                summary.type == "PRTS",
-                !excluding.contains(summary.id),
-                let content = try? JSONDecoder().decode(Content.self, from: Data(summary.content.utf8)),
-                content.stageName == stageName
-            else {
-                continue
-            }
+    private static func hasFormation(_ content: Content) -> Bool {
+        let formationCount = (content.opers?.count ?? 0) + (content.groups?.count ?? 0)
+        return formationCount > 0
+    }
 
-            let evaluation = ownedMap.map { Self.matchEvaluation(for: content, owned: $0) }
-                ?? MatchEvaluation(mode: .ready, training: [])
-            guard evaluation.mode != .blocked else {
-                continue
-            }
-            ranked.append((summary.id, evaluation.mode, evaluation.training))
+    private static func hasPlayableContent(_ content: Content) -> Bool {
+        hasFormation(content) && !(content.actions?.isEmpty ?? true)
+    }
+
+    private static func searchKeywords(for stageName: String) -> [String] {
+        var keywords: [String] = []
+
+        // 1. Stage ID and its difficulty variants
+        if stageName.hasPrefix("main_") {
+            let suffix = String(stageName.dropFirst("main_".count))
+            keywords.append(contentsOf: [stageName, "tough_" + suffix, "easy_" + suffix])
+        } else {
+            keywords.append(stageName)
         }
 
-        var urls: [URL] = []
-        for mode in [MatchMode.ready, .borrow] {
-            for candidate in ranked where candidate.mode == mode {
-                urls.append(try await download(id: candidate.id))
-                if urls.count >= limit {
-                    return urls
-                }
+        // 2. Visible Stage Code (e.g. 12-10, S5-3, R8-1, CE-6)
+        if let code = MAACopilot.stageCodes[stageName] {
+            keywords.append(code)
+            keywords.append(contentsOf: ["\(code)-NORMAL", "\(code)-HARD"])
+        } else if let id = MAACopilot.stageIdByCode[stageName] {
+            if id.hasPrefix("main_") {
+                let suffix = String(id.dropFirst("main_".count))
+                keywords.append(contentsOf: [id, "tough_" + suffix, "easy_" + suffix])
+            } else {
+                keywords.append(id)
             }
         }
-        if urls.isEmpty {
-            let training = ranked
-                .filter { $0.mode == .train }
-                .flatMap(\.training)
-            if !training.isEmpty {
-                throw PRTSPlusError.trainingRequired(stageName, Array(Set(training)).sorted())
-            }
+
+        // Deduplicate while preserving insertion order
+        var seen = Set<String>()
+        return keywords.filter { seen.insert($0).inserted }
+    }
+
+    private static func stageCompatibilityRank(candidate: String, requested: String) -> Int? {
+        if candidate == requested {
+            return 0
         }
-        return urls
+
+        // 1. Check matching prefix variants (main_ / tough_ / easy_)
+        let prefixes = ["main_", "tough_", "easy_"]
+        if let requestedPrefix = prefixes.first(where: requested.hasPrefix),
+            let candidatePrefix = prefixes.first(where: candidate.hasPrefix),
+            requested.dropFirst(requestedPrefix.count) == candidate.dropFirst(candidatePrefix.count)
+        {
+            if candidate.hasPrefix("main_") {
+                return 1
+            }
+            if candidate.hasPrefix("tough_") {
+                return 2
+            }
+            return 3
+        }
+
+        // 2. Check matching visible stage code
+        let requestedCode = MAACopilot.stageCodes[requested] ?? requested
+        let candidateCode = MAACopilot.stageCodes[candidate] ?? candidate
+        let cleanCandidateCode = candidateCode
+            .replacingOccurrences(
+                of: #"-?(NORMAL|HARD|EASY|磨难|标准|险地|常规)$"#,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if cleanCandidateCode.caseInsensitiveCompare(requestedCode) == .orderedSame {
+            if candidateCode.localizedCaseInsensitiveContains("HARD")
+                || candidateCode.contains("磨难")
+                || candidateCode.contains("险地")
+            {
+                return 2
+            }
+            return 1
+        }
+
+        return nil
+    }
+
+    private static func downloadPlayable(id: Int, stageName: String) async throws -> URL? {
+        let url = try await download(id: id)
+        guard let data = try? Data(contentsOf: url),
+            let content = try? JSONDecoder().decode(Content.self, from: data),
+            stageCompatibilityRank(candidate: content.stageName, requested: stageName) != nil,
+            hasPlayableContent(content)
+        else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        return url
     }
 
     private static func download(id: Int) async throws -> URL {
@@ -445,6 +633,54 @@ enum PRTSPlusClient {
         let fileURL = cacheDirectory.appendingPathComponent("\(id).json")
         try Data(getData.content.utf8).write(to: fileURL, options: .atomic)
         return fileURL
+    }
+
+    static func copilotSetID(from input: String) -> Int? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let patterns = [
+            #"^(?:prts://)?s(\d+)$"#,
+            #"^https?://[^/]+/(?:set|copilot/set)/(\d+)/?$"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+                let range = Range(match.range(at: 1), in: value)
+            else {
+                continue
+            }
+            return Int(value[range])
+        }
+        return nil
+    }
+
+    static func downloadCopilotSet(id: Int) async throws -> [URL] {
+        var components = URLComponents(url: apiBaseURL.appendingPathComponent("set/get"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "id", value: String(id))]
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(from: components.url!)
+        }
+        catch {
+            throw PRTSPlusError.network(error)
+        }
+
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw PRTSPlusError.httpStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        guard let payload = try? JSONDecoder().decode(SetResponse.self, from: data) else {
+            throw PRTSPlusError.invalidResponse
+        }
+        guard payload.statusCode == 200, let set = payload.data else {
+            throw PRTSPlusError.api(payload.message ?? "作业集不存在")
+        }
+
+        var urls: [URL] = []
+        for copilotID in set.copilotIds {
+            urls.append(try await download(id: copilotID))
+        }
+        return urls
     }
 
     private static var cacheDirectory: URL {
@@ -536,6 +772,8 @@ enum PRTSPlusClient {
     private static func normalize(_ name: String) -> String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "（", with: "(")
+            .replacingOccurrences(of: "）", with: ")")
     }
 
     private static func maxLevels(for rarity: Int) -> [Int] {
@@ -657,24 +895,55 @@ enum PRTSPlusClient {
 }
 
 enum BarkClient {
+    private struct Response: Decodable {
+        let code: Int
+        let message: String?
+    }
+
     static func notify(endpoint: String, title: String, body: String) async throws {
         let value = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: value), url.scheme == "https" else {
+        guard let endpointURL = URL(string: value), endpointURL.scheme == "https" else {
             throw PRTSPlusError.api("Bark 地址无效，请填写 https:// 开头的推送地址")
         }
 
-        var request = URLRequest(url: url)
+        let pathComponents = endpointURL.pathComponents.filter { $0 != "/" }
+        guard let deviceKey = pathComponents.last, deviceKey != "push" else {
+            throw PRTSPlusError.api("Bark 地址缺少设备码")
+        }
+        var components = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)!
+        components.path = "/" + (pathComponents.dropLast() + ["push"]).joined(separator: "/")
+        components.query = nil
+        components.fragment = nil
+        guard let pushURL = components.url else {
+            throw PRTSPlusError.api("Bark 地址无效")
+        }
+
+        var request = URLRequest(url: pushURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "device_key": deviceKey,
             "title": title,
             "body": body,
-            "group": "MAA 全主线推进",
+            "group": "MAA 连续作战",
         ])
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        }
+        catch {
+            throw PRTSPlusError.network(error)
+        }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw PRTSPlusError.httpStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        guard let payload = try? JSONDecoder().decode(Response.self, from: data) else {
+            throw PRTSPlusError.invalidResponse
+        }
+        guard payload.code == 200 else {
+            throw PRTSPlusError.api(payload.message ?? "Bark 推送失败（\(payload.code)）")
         }
     }
 }

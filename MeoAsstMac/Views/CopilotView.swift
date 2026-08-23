@@ -80,6 +80,7 @@ private struct RegularCopilotConfigView: View {
         VStack {
             Text("默认战斗设置")
                 .font(.headline)
+            Stepper("战斗次数：\(config.loop_times)", value: $config.loop_times, in: 1...9999)
             Toggle("理智不足时使用理智药", isOn: $config.use_sanity_potion)
             Toggle("自动编队", isOn: $config.formation)
             if config.formation {

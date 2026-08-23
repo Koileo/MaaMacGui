@@ -255,6 +255,14 @@ extension MAAViewModel {
             }
         }
 
+        if await handle?.running == true {
+            try? await handle?.stop()
+            for _ in 0..<30 {
+                if await handle?.running == false { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+
         guard await handle?.running == false else {
             throw MAAError.handleNotRunning
         }
@@ -265,27 +273,29 @@ extension MAAViewModel {
 
         guard requireConnect else { return }
 
-        logTrace("ConnectingToEmulator")
-        if touchMode == .MacPlayTools {
-            logTrace("如果长时间连接不上或出错，请尝试下载使用“文件” > “PlayCover链接…”中的最新版本")
-            if toolsMode == .MacSCK && !CGPreflightScreenCaptureAccess() {
-                logError("未开启屏幕录制权限，请前往“系统设置” > “隐私与安全性” > “录屏与系统录音”允许MAA访问")
+        if await handle?.connected == false {
+            logTrace("ConnectingToEmulator")
+            if touchMode == .MacPlayTools {
+                logTrace("如果长时间连接不上或出错，请尝试下载使用“文件” > “PlayCover链接…”中的最新版本")
+                if toolsMode == .MacSCK && !CGPreflightScreenCaptureAccess() {
+                    logError("未开启屏幕录制权限，请前往“系统设置” > “隐私与安全性” > “录屏与系统录音”允许MAA访问")
+                }
             }
-        }
 
-        let connectionProfile: String
-        switch (touchMode, toolsMode, useGzip) {
-        case (.MacPlayTools, .MacSCK, _):
-            connectionProfile = "MacSCK"
-        case (.MacPlayTools, .BGR, _):
-            connectionProfile = "MacBGR"
-        case (_, _, true):
-            connectionProfile = "Compatible"
-        default:
-            connectionProfile = "CompatMac"
-        }
+            let connectionProfile: String
+            switch (touchMode, toolsMode, useGzip) {
+            case (.MacPlayTools, .MacSCK, _):
+                connectionProfile = "MacSCK"
+            case (.MacPlayTools, .BGR, _):
+                connectionProfile = "MacBGR"
+            case (_, _, true):
+                connectionProfile = "Compatible"
+            default:
+                connectionProfile = "CompatMac"
+            }
 
-        try await handle?.connect(adbPath: adbPath, address: connectionAddress, profile: connectionProfile)
+            try await handle?.connect(adbPath: adbPath, address: connectionAddress, profile: connectionProfile)
+        }
         logTrace("Running")
     }
 
@@ -301,6 +311,35 @@ extension MAAViewModel {
         status = .idle
         medicineUsedTimes = 0
         expiringMedicineUsedTimes = 0
+    }
+
+    func markPending() {
+        status = .pending
+    }
+
+    func waitUntilCopilotCompleted() async throws -> Bool {
+        for _ in 0..<50 {
+            try Task.checkCancellation()
+            if await handle?.running == true {
+                break
+            }
+            if let lastCopilotRunSucceeded {
+                return lastCopilotRunSucceeded
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+
+        while true {
+            try Task.checkCancellation()
+            if await handle?.running == false {
+                if let lastCopilotRunSucceeded {
+                    return lastCopilotRunSucceeded
+                }
+                try await Task.sleep(nanoseconds: 200_000_000)
+                return lastCopilotRunSucceeded ?? false
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
     }
 
     func screenshot() async throws -> NSImage {

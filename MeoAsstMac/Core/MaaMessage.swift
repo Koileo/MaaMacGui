@@ -142,7 +142,6 @@ extension MAAViewModel {
                     FailedCopilotStore.markFailed(fileName: currentCopilotFileName)
                 }
                 logError("CombatError")
-                resetStatus()
             }
 
         case .TaskChainStart:
