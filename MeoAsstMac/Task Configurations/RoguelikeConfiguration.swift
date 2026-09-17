@@ -21,10 +21,18 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
         ///
         /// 萨米主题专用模式
         case clpPds = 5
-        /// 月度小队，尽可能稳定抵达五层，不期而遇采用激进策略
+        /// 月度小队，尽可能稳定地打更多层数，不期而遇采用激进策略
         case squad = 6
         /// 深入调查，尽可能稳定地打更多层数，不期而遇采用激进策略
         case exploration = 7
+        /// 刷常乐节点，第一层进洞，找不到目标节点就重开
+        ///
+        /// 界园主题专用模式
+        case findPlaytime = 20001
+        /// 刷襁褓动物
+        ///
+        /// 黑流树海主题专用模式
+        case babyAnimal = 30001
     }
 
     enum Theme: String, CaseIterable, Codable {
@@ -33,6 +41,7 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
         case Sami
         case Sarkaz
         case JieGarden
+        case BlackFlow
     }
 
     struct Difficulty: Hashable, Identifiable {
@@ -40,14 +49,32 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
     }
 
     struct StartCollectibles: Codable, Hashable {
-        var hot_water = false
+        var hot_water = true
         var shield = false
         var ingot = false
-        var hope = false
+        var hope = true
         var random = false
         var key = false
         var dice = false
-        var ideas = false
+        var ideas = true
+        var ticket = false
+    }
+
+    enum JiePlaytimeTarget: Int, Codable, CaseIterable {
+        case ling = 1
+        case shu = 2
+        case nian = 3
+    }
+
+    enum BlackflowStrategy: String, Codable, CaseIterable {
+        case babyAnimal = "baby_animal"
+    }
+
+    enum BlackflowCultivation: String, Codable, CaseIterable {
+        case swaddledCat = "swaddled_cat"
+        case swaddledFeatheredSerpent = "swaddled_feathered_serpent"
+        case swaddledDog = "swaddled_dog"
+        case swaddledCerberus = "swaddled_cerberus"
     }
 
     var theme: Theme {
@@ -61,23 +88,30 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
             if !theme.squads.contains(squad) {
                 squad = theme.squads.first ?? "指挥分队"
             }
+            if !theme.squads.contains(collectible_mode_squad) {
+                collectible_mode_squad = squad
+            }
         }
     }
     var mode: Mode {
         didSet {
             use_foldartal = mode != .clpPds
             check_collapsal_paradigms = mode == .clpPds
+            if mode == .investment { investment_enabled = true }
+            if theme == .BlackFlow { investment_with_more_score = false }
         }
     }
     var squad: String
     var roles: String
     var core_char: String
-    var use_support: Bool
+    var use_support: Bool {
+        didSet {
+            if use_support { start_with_elite_two = false }
+        }
+    }
     var use_nonfriend_support: Bool
     var starts_count: Int
     /// 指定难度等级，可选，默认值 `0`
-    ///
-    /// 仅适用于**除 `Phantom` 以外**的主题
     var difficulty: Difficulty
     /// 是否在第 5 层险路恶敌节点前停止任务，可选，默认值 `false`
     ///
@@ -94,7 +128,11 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
     /// 是否在凹开局的同时凹干员精二直升，可选，默认值 `false`
     ///
     /// 仅适用于模式 `collectible`
-    var start_with_elite_two: Bool
+    var start_with_elite_two: Bool {
+        didSet {
+            if start_with_elite_two { use_support = false }
+        }
+    }
     /// 是否只凹开局干员精二直升而忽视其他开局条件，可选，默认值 `false`
     ///
     /// 仅在模式为 `collectible` 且 `start_with_elite_two` 为 `true` 时有效
@@ -103,18 +141,14 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
     ///
     /// 仅适用于 `Mizuki` 主题，用于刷指路鳞
     var refresh_trader_with_dice: Bool
-    /// 希望在第一层远见阶段得到的密文版，若成功凹到则停止任务，可选
+    /// 希望在第一层远见阶段得到的密文板，若成功凹到则停止任务，可选
     ///
     /// 仅适用于 `Sami` 主题
     var first_floor_foldartal: String
-    /// 凹开局时希望在开局奖励阶段得到的密文板，可选，默认值 `[]`
+    /// 凹开局时希望在开局奖励阶段得到的密文板，最多三块，可选，默认值 `[]`
     ///
     /// 仅在主题为 `Sami` 模式为 `collectible` 且使用 "生活至上分队" 时有效；
     var start_foldartal_list: [String]
-    /// 是否凹 2 构想开局，可选，默认值 `false`
-    ///
-    /// 仅在主题为 `Sarkaz` 且模式为 `collectible` 时有效
-    var start_with_two_ideas: Bool
     /// 是否使用密文板，模式 `clpPds` 下默认值 `false`，其他模式下默认值 `true`
     ///
     /// 仅适用于 `Sami` 主题
@@ -147,10 +181,27 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
     ///
     /// 仅在模式为 `collectible` 时有效
     var collectible_mode_squad: String
-    /// 烧水期望奖励, 默认全 `false`
+    /// 烧水期望奖励，默认热水壶、希望和构想为 `true`，其余为 `false`
     ///
     /// 仅在模式为 `collectible` 时有效
+    ///
+    /// 传递给 Core 时，建议用 ``checkedStartCollectibles``
     var collectible_mode_start_list: StartCollectibles
+
+    var jieFindPlaytimeTarget = JiePlaytimeTarget.ling
+
+    var blackflowCultivationTarget = BlackflowCultivation.swaddledCat
+
+    var supportsStartWithEliteTwo: Bool {
+        mode == .collectible
+            && (theme == .Mizuki || theme == .Sami)
+            && [
+                "突击战术分队",
+                "堡垒战术分队",
+                "远程战术分队",
+                "破坏战术分队",
+            ].contains(squad)
+    }
 
     var title: String {
         type.description
@@ -189,7 +240,6 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
         let refresh_trader_with_dice: Bool?
         let first_floor_foldartal: String?
         let start_foldartal_list: [String]?
-        let start_with_two_ideas: Bool?
         let use_foldartal: Bool?
         let check_collapsal_paradigms: Bool?
         let expected_collapsal_paradigms: [String]?
@@ -199,6 +249,9 @@ struct RoguelikeConfiguration: MAATaskConfiguration {
         let collectible_mode_shopping: Bool?
         let collectible_mode_squad: String?
         let collectible_mode_start_list: StartCollectibles?
+        let find_playTime_target: Int?
+        let blackflow_strategy: String?
+        let blackflow_cultivation_target: String?
     }
 
     var params: Params {
@@ -219,14 +272,21 @@ extension RoguelikeConfiguration.Theme {
             return String(localized: "萨卡兹")
         case .JieGarden:
             return String(localized: "界园")
+        case .BlackFlow:
+            return String(localized: "黑流树海")
         }
     }
 
     var modes: [RoguelikeConfiguration.Mode] {
         let commonModes = [RoguelikeConfiguration.Mode.exp, .investment, .collectible, .squad, .exploration]
-        if self == .Sami {
+        switch self {
+        case .Sami:
             return commonModes + [.clpPds]
-        } else {
+        case .JieGarden:
+            return commonModes + [.findPlaytime]
+        case .BlackFlow:
+            return [.exp, .investment, .babyAnimal]
+        default:
             return commonModes
         }
     }
@@ -247,6 +307,10 @@ extension RoguelikeConfiguration.Mode {
             String(localized: "月度小队")
         case .exploration:
             String(localized: "深入调查")
+        case .findPlaytime:
+            String(localized: "刷常乐节点")
+        case .babyAnimal:
+            String(localized: "刷襁褓动物")
         }
     }
 }
@@ -281,6 +345,91 @@ extension RoguelikeConfiguration.Difficulty: Codable, CustomStringConvertible {
     }
 }
 
+extension RoguelikeConfiguration.JiePlaytimeTarget: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .ling:
+            String(localized: .roguelikePlaytimeLing)
+        case .shu:
+            String(localized: .roguelikePlaytimeShu)
+        case .nian:
+            String(localized: .roguelikePlaytimeNian)
+        }
+    }
+}
+
+extension RoguelikeConfiguration.BlackflowCultivation: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .swaddledCat:
+            String(localized: "襁褓中的猫")
+        case .swaddledFeatheredSerpent:
+            String(localized: "襁褓羽蛇")
+        case .swaddledDog:
+            String(localized: "襁褓中的狗")
+        case .swaddledCerberus:
+            String(localized: "襁褓三头犬")
+        }
+    }
+}
+
+// TODO: 迁移更多判断逻辑至计算属性
+extension RoguelikeConfiguration {
+    fileprivate var checkedStartWithEliteTwo: Bool? {
+        guard supportsStartWithEliteTwo, !use_support else { return nil }
+        return start_with_elite_two
+    }
+
+    fileprivate var checkedOnlyStartWithEliteTwo: Bool? {
+        guard checkedStartWithEliteTwo == true else { return nil }
+        return only_start_with_elite_two
+    }
+
+    fileprivate var checkedFirstFloorFoldartal: String? {
+        guard theme == .Sami, mode == .collectible else { return nil }
+        let foldartal = first_floor_foldartal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !foldartal.isEmpty else { return nil }
+        return foldartal
+    }
+
+    fileprivate var checkedStartFoldartalList: [String]? {
+        guard theme == .Sami, mode == .collectible, squad == "生活至上分队" else { return nil }
+        let foldartals = start_foldartal_list.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(3)
+        return foldartals.isEmpty ? nil : Array(foldartals)
+    }
+
+    fileprivate var checkedExpectedCollapsalParadigms: [String]? {
+        guard theme == .Sami, mode == .clpPds else { return nil }
+        let paradigms = expected_collapsal_paradigms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return paradigms.isEmpty ? nil : paradigms
+    }
+
+    fileprivate var checkedStartCollectibles: StartCollectibles? {
+        guard mode == .collectible else { return nil }
+        switch theme {
+        case .JieGarden:
+            var collectibles = collectible_mode_start_list
+            collectibles.hope = false
+            return collectibles
+        default:
+            return collectible_mode_start_list
+        }
+    }
+
+    fileprivate var checkedJiePlaytimeTarget: Int? {
+        guard theme == .JieGarden, mode == .findPlaytime else { return nil }
+        return jieFindPlaytimeTarget.rawValue
+    }
+
+    fileprivate var checkedBlackflowStrategy: String? {
+        guard theme == .BlackFlow, mode == .babyAnimal else { return nil }
+        return BlackflowStrategy.babyAnimal.rawValue
+    }
+}
+
 extension RoguelikeConfiguration.Params {
     init(config: RoguelikeConfiguration) {
         self.theme = config.theme.rawValue
@@ -291,34 +440,33 @@ extension RoguelikeConfiguration.Params {
         self.use_support = config.use_support
         self.use_nonfriend_support = config.use_support ? config.use_nonfriend_support : nil
         self.starts_count = config.starts_count
-        self.difficulty = config.theme != .Phantom ? config.difficulty.id : nil
-        self.stop_at_final_boss = config.theme != .Phantom ? config.stop_at_final_boss : nil
-        self.stop_at_max_level = config.stop_at_max_level
-        self.investment_enabled = config.investment_enabled
-        self.investments_count = config.investments_count
-        self.stop_when_investment_full = config.stop_when_investment_full
-        self.investment_with_more_score = config.mode == .investment ? config.investment_with_more_score : nil
-        self.start_with_elite_two = config.mode == .collectible ? config.start_with_elite_two : nil
-        self.only_start_with_elite_two =
-            config.mode == .collectible && config.start_with_elite_two ? config.only_start_with_elite_two : nil
+        self.difficulty = config.difficulty.id
+        self.stop_at_final_boss = config.mode == .exp && config.theme != .Phantom ? config.stop_at_final_boss : nil
+        self.stop_at_max_level = config.mode == .exp ? config.stop_at_max_level : nil
+        self.investment_enabled = config.mode == .investment || config.investment_enabled
+        self.investments_count = config.mode == .investment ? config.investments_count : nil
+        self.stop_when_investment_full = config.mode == .investment ? config.stop_when_investment_full : nil
+        self.investment_with_more_score =
+            config.mode == .investment && config.theme != .BlackFlow ? config.investment_with_more_score : nil
+        self.start_with_elite_two = config.checkedStartWithEliteTwo
+        self.only_start_with_elite_two = config.checkedOnlyStartWithEliteTwo
         self.refresh_trader_with_dice = config.theme == .Mizuki ? config.refresh_trader_with_dice : nil
-        self.first_floor_foldartal = config.theme == .Sami ? config.first_floor_foldartal : nil
-        self.start_foldartal_list =
-            config.theme == .Sami && config.mode == .collectible && config.squad == "生活至上分队"
-            ? config.start_foldartal_list : nil
-        self.start_with_two_ideas =
-            config.theme == .Sarkaz && config.mode == .collectible ? config.start_with_two_ideas : nil
+        self.first_floor_foldartal = config.checkedFirstFloorFoldartal
+        self.start_foldartal_list = config.checkedStartFoldartalList
         self.use_foldartal = config.theme == .Sami ? config.use_foldartal : nil
         self.check_collapsal_paradigms = config.theme == .Sami ? config.check_collapsal_paradigms : nil
-        self.expected_collapsal_paradigms =
-            config.theme == .Sami && config.mode == .clpPds ? config.expected_collapsal_paradigms : nil
+        self.expected_collapsal_paradigms = config.checkedExpectedCollapsalParadigms
         self.monthly_squad_auto_iterate = config.mode == .squad ? config.monthly_squad_auto_iterate : nil
         self.monthly_squad_check_comms =
             config.mode == .squad && config.monthly_squad_auto_iterate ? config.monthly_squad_check_comms : nil
         self.deep_exploration_auto_iterate = config.mode == .exploration ? config.deep_exploration_auto_iterate : nil
         self.collectible_mode_shopping = config.mode == .collectible ? config.collectible_mode_shopping : nil
         self.collectible_mode_squad = config.mode == .collectible ? config.collectible_mode_squad : nil
-        self.collectible_mode_start_list = config.mode == .collectible ? config.collectible_mode_start_list : nil
+        self.collectible_mode_start_list = config.checkedStartCollectibles
+        self.find_playTime_target = config.checkedJiePlaytimeTarget
+        self.blackflow_strategy = config.checkedBlackflowStrategy
+        self.blackflow_cultivation_target =
+            config.mode == .babyAnimal ? config.blackflowCultivationTarget.rawValue : nil
     }
 }
 
@@ -349,7 +497,6 @@ extension RoguelikeConfiguration {
             try container.decodeIfPresent(Bool.self, forKey: .refresh_trader_with_dice) ?? false
         self.first_floor_foldartal = try container.decodeIfPresent(String.self, forKey: .first_floor_foldartal) ?? ""
         self.start_foldartal_list = try container.decodeIfPresent([String].self, forKey: .start_foldartal_list) ?? []
-        self.start_with_two_ideas = try container.decodeIfPresent(Bool.self, forKey: .start_with_two_ideas) ?? false
         self.use_foldartal = try container.decodeIfPresent(Bool.self, forKey: .use_foldartal) ?? true
         self.check_collapsal_paradigms =
             try container.decodeIfPresent(Bool.self, forKey: .check_collapsal_paradigms) ?? false
@@ -358,11 +505,11 @@ extension RoguelikeConfiguration {
                 "目空一些", "睁眼瞎", "图像损坏", "一抹黑",
             ]
         self.monthly_squad_auto_iterate =
-            try container.decodeIfPresent(Bool.self, forKey: .monthly_squad_auto_iterate) ?? false
+            try container.decodeIfPresent(Bool.self, forKey: .monthly_squad_auto_iterate) ?? true
         self.monthly_squad_check_comms =
-            try container.decodeIfPresent(Bool.self, forKey: .monthly_squad_check_comms) ?? false
+            try container.decodeIfPresent(Bool.self, forKey: .monthly_squad_check_comms) ?? true
         self.deep_exploration_auto_iterate =
-            try container.decodeIfPresent(Bool.self, forKey: .deep_exploration_auto_iterate) ?? false
+            try container.decodeIfPresent(Bool.self, forKey: .deep_exploration_auto_iterate) ?? true
         self.collectible_mode_shopping =
             try container.decodeIfPresent(Bool.self, forKey: .collectible_mode_shopping) ?? false
         self.collectible_mode_squad =
@@ -370,5 +517,10 @@ extension RoguelikeConfiguration {
         self.collectible_mode_start_list =
             try container.decodeIfPresent(StartCollectibles.self, forKey: .collectible_mode_start_list)
             ?? StartCollectibles()
+        self.jieFindPlaytimeTarget =
+            try container.decodeIfPresent(JiePlaytimeTarget.self, forKey: .jieFindPlaytimeTarget) ?? .ling
+        self.blackflowCultivationTarget =
+            try container.decodeIfPresent(BlackflowCultivation.self, forKey: .blackflowCultivationTarget)
+            ?? .swaddledCat
     }
 }

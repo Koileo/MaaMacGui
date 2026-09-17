@@ -37,7 +37,7 @@ struct TasksContent: View {
             }
             .onMove(perform: moveTask)
         }
-        .onChange(of: selection, perform: updateViewMode)
+        .onChange(of: selection, updateViewMode)
         .toolbar(content: listToolbar)
         .animation(.default, value: viewModel.tasks)
         .onReceive(viewModel.$newTaskAdded, perform: selectLastTask)
@@ -79,7 +79,6 @@ struct TasksContent: View {
 
     private func start() {
         Task {
-            viewModel.dailyTasksDetailMode = .log
             await viewModel.tryStartTasks()
         }
     }
@@ -109,21 +108,15 @@ struct TasksContent: View {
         viewModel.tasks.move(fromOffsets: from, toOffset: to)
     }
 
-    private func deselectTask(_ viewMode: MAAViewModel.DailyTasksDetailMode) {
-        if viewMode != .taskConfig {
-            selection = nil
-        }
-    }
-
     private func selectLastTask(_ shouldSelect: Bool) {
         if shouldSelect {
             selection = viewModel.tasks.last?.id
         }
     }
 
-    private func updateViewMode(_ selectedTaskID: UUID?) {
+    private func updateViewMode(_: UUID?, selectedTaskID: UUID?) {
         guard selectedTaskID != nil else { return }
-        viewModel.dailyTasksDetailMode = .taskConfig
+        viewModel.logStore?.setDailyTasksDetailMode(.taskConfig)
     }
 
     // MARK: - State Wrappers

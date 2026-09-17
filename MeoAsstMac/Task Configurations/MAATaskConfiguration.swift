@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-protocol MAATaskConfiguration: Codable & Hashable {
+protocol MAATaskConfiguration: Codable, Hashable, Sendable {
     var type: MAATaskType { get }
 
     var title: String { get }
@@ -56,5 +56,11 @@ extension MAAHandle {
 
     fileprivate func appendTask<T: MAATaskConfiguration>(config: T) throws -> Int32 {
         try appendTask(type: config.type, params: config.params.jsonString())
+    }
+}
+
+extension KeyedDecodingContainer {
+    subscript<T: Decodable>(key: Key, default defaultValue: @autoclosure () -> T) -> T {
+        (try? decode(T.self, forKey: key)) ?? defaultValue()
     }
 }

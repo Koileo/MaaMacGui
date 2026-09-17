@@ -7,9 +7,9 @@
 
 import CoreGraphics
 import Foundation
+import JBirdCore
 import MaaCore
 import OSLog
-import SwiftyJSON
 
 private let logger = Logger(subsystem: "plus.maa.swift", category: "MAAHandle")
 
@@ -28,45 +28,57 @@ actor MAAProvider {
             throw MaaCoreError.setUserDirectoryFailed
         }
     }
+
+    func mapLevelCode(matching key: String) -> String? {
+        let mapLevelKey = key.withCString {
+            AsstGetMapLevelKey($0)
+        }
+        guard let code = mapLevelKey.code else {
+            return nil
+        }
+        return String(cString: code)
+    }
+
+    func itemName(for id: String) -> String {
+        let name = id.withCString {
+            AsstGetItemName($0)
+        }
+        guard let name else { return "" }
+        return String(cString: name)
+    }
 }
 
-private func handleAsst(msg: AsstId, detailsPtr: UnsafePointer<CChar>?, handlePtr: UnsafeMutableRawPointer?) {
-    guard let handlePtr else {
-        logger.error("handlePtr is nil")
-        return
+extension MAAProvider {
+    func itemNames<S: Sequence<String>>(for ids: S) -> [String: String] {
+        ids.reduce(into: [:]) { partialResult, id in
+            partialResult[id] = itemName(for: id)
+        }
     }
-    let handle = Unmanaged<MAAHandle>.fromOpaque(handlePtr).takeUnretainedValue()
-
-    let details = detailsPtr.map(String.init(cString:))
-
-    let json = details.map(JSON.init(parseJSON:)) ?? .null
-    handle.send(message: .init(code: Int(msg), details: json))
 }
 
 actor MAAHandle {
-    private var handle: AsstHandle!
-
-    private let callbacks: AsyncStream<MaaMessage>
-    private let callbackContinuation: AsyncStream<MaaMessage>.Continuation
-    private var callbackTask: Task<Void, Never>!
+    private nonisolated(unsafe) var handle: AsstHandle!
 
     nonisolated let messages: AsyncStream<MaaMessage>
-    private let messageContinuation: AsyncStream<MaaMessage>.Continuation
+    private let continuation: AsyncStream<MaaMessage>.Continuation
     private var pendingCalls = [AsstAsyncCallId: CheckedContinuation<JSON, Error>]()
 
     init(options: MAAInstanceOptions = [:]) async throws {
-        (self.callbacks, self.callbackContinuation) = AsyncStream<MaaMessage>.makeStream()
-        (self.messages, self.messageContinuation) = AsyncStream<MaaMessage>.makeStream()
-
-        self.callbackTask = Task { [weak self, callbacks] in
-            for await callback in callbacks {
-                await self?.process(callback)
-            }
-        }
+        (messages, continuation) = AsyncStream<MaaMessage>.makeStream()
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        handle = AsstCreateEx(handleAsst, selfPtr)
+        handle = AsstCreateEx(
+            { msg, details, context in
+                let data = details.map { Data(bytes: $0, count: strlen($0)) } ?? Data()
+                let handle = Unmanaged<MAAHandle>.fromOpaque(context!).takeUnretainedValue()
+                handle.process(msg: msg, details: data)
+            }, selfPtr)
 
+        try apply(options: options)
+    }
+
+    /// 应用实例选项（触控模式、AdbLite 等）。可在实例创建后随时调用，核心在下次连接时生效。
+    func apply(options: MAAInstanceOptions) throws {
         for (key, value) in options {
             let success = AsstSetInstanceOption(handle, key.rawValue, value)
             guard success.isTrue else {
@@ -77,32 +89,41 @@ actor MAAHandle {
 
     deinit {
         AsstDestroy(handle)
-        callbackTask?.cancel()
-        callbackContinuation.finish()
         pendingCalls.forEach { $1.resume(throwing: CancellationError()) }
-        messageContinuation.finish()
+        continuation.finish()
     }
 
-    nonisolated func send(message: MaaMessage) {
-        self.callbackContinuation.yield(message)
-    }
-
-    private func process(_ message: MaaMessage) {
-        if message.code == 4 {
+    private nonisolated func process(msg: AsstId, details: Data) {
+        let info: JSON
+        do {
+            info = try JSON(details)
+        } catch {
+            logger.error("Failed to parse details: \(error)")
+            return
+        }
+        if msg == 4 {
             // AsyncCallInfo
-            let info = message.details
-            guard let callID = info["async_call_id"].int32 else {
+            let callID: AsstAsyncCallId
+            do {
+                callID = try info["async_call_id"]
+            } catch {
                 logger.error("Invalid `async_call_id` in AsyncCallInfo: \(info)")
                 return
             }
-            guard let continuation = pendingCalls.removeValue(forKey: callID) else {
-                logger.error("No pending call with ID: \(callID)")
-                return
+            Task {
+                await resumeCall(for: callID, info: info)
             }
-            continuation.resume(returning: info)
             return
         }
-        messageContinuation.yield(message)
+        continuation.yield(.init(code: Int(msg), details: info))
+    }
+
+    private func resumeCall(for id: AsstAsyncCallId, info: JSON) {
+        guard let continuation = pendingCalls.removeValue(forKey: id) else {
+            logger.error("No pending call with ID: \(id)")
+            return
+        }
+        continuation.resume(returning: info)
     }
 
     private func waitFor(_ call: @autoclosure () -> AsstAsyncCallId) async throws -> JSON {
@@ -111,6 +132,9 @@ actor MAAHandle {
             guard callID != 0 else {
                 continuation.resume(throwing: MaaCoreError.asyncCallFailed)
                 return
+            }
+            guard !pendingCalls.keys.contains(callID) else {
+                fatalError("Duplicated pending calls")
             }
             pendingCalls[callID] = continuation
         }
@@ -128,12 +152,7 @@ actor MAAHandle {
     func connect(adbPath: String, address: String, profile: String) async throws {
         let info = try await waitFor(AsstAsyncConnect(handle, adbPath, address, profile, 0))
 
-        guard let ret = info["details"]["ret"].bool else {
-            logger.error("Invalid `ret` in AsyncCallInfo: \(info)")
-            throw MaaCoreError.connectFailed
-        }
-
-        guard ret else {
+        guard try info["details"]["ret"] else {
             throw MaaCoreError.connectFailed
         }
     }
@@ -190,6 +209,7 @@ enum MAATaskType: String {
     case Roguelike
     case Copilot
     case SSSCopilot
+    case ParadoxCopilot
     case Depot
     case Reclamation
     case VideoRecognition
@@ -223,16 +243,6 @@ extension Notification.Name {
     static let MAAPreventSystemSleepingChanged = Notification.Name("MAAPreventSystemSleepingChanged")
 }
 
-extension JSON {
-    func parseTo<T: Decodable>() -> T? {
-        guard let data = try? rawData(options: .prettyPrinted) else {
-            return nil
-        }
-        let decoder = JSONDecoder()
-        return try? decoder.decode(T.self, from: data)
-    }
-}
-
 extension AsstBool {
     fileprivate var isTrue: Bool { self != 0 }
 }
@@ -260,5 +270,47 @@ extension MAAResourceVersion {
         } else {
             return gacha.pool
         }
+    }
+}
+
+struct MAAStageActivity: Decodable, Hashable {
+    let miniGame: [MiniGame]
+
+    struct MiniGame: Decodable, Hashable {
+        let Display: String?
+        let DisplayKey: String?
+        let Value: String
+        let Tip: String?
+        let TipKey: String?
+        let MinimumRequired: String?
+        private let UtcStartTime: String?
+        private let UtcExpireTime: String?
+        private let TimeZone: Double?
+    }
+}
+
+extension MAAStageActivity.MiniGame {
+    var startTime: Date {
+        if let value = UtcStartTime, let date = try? dateParser?.parse(value) {
+            return date
+        } else {
+            return .distantPast
+        }
+    }
+
+    var expireTime: Date {
+        if let value = UtcExpireTime, let date = try? dateParser?.parse(value) {
+            return date
+        } else {
+            return .distantFuture
+        }
+    }
+
+    private var dateParser: Date.ParseStrategy? {
+        guard let TimeZone else { return nil }
+        return .init(
+            format:
+                "\(year: .defaultDigits)/\(month: .twoDigits)/\(day: .twoDigits) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)",
+            timeZone: .init(secondsFromGMT: Int(TimeZone * 3600))!)
     }
 }

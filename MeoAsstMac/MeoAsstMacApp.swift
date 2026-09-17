@@ -11,24 +11,33 @@ import SwiftUI
 @main
 struct MeoAsstMacApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
-    @StateObject private var appViewModel = MAAViewModel()
+    @StateObject private var appViewModel: MAAViewModel
+    @State private var newViewModel: NewViewModel
 
     private let updaterController: SPUStandardUpdaterController
     private let updaterDelegate = MaaUpdaterDelegate()
 
     init() {
+        let viewModel = MAAViewModel()
+        let newModel = NewViewModel(parent: viewModel)
+        _appViewModel = StateObject(wrappedValue: viewModel)
+        _newViewModel = State(wrappedValue: newModel)
         #if DEBUG
         let isRelease = false
         #else
         let isRelease = true
         #endif
         updaterController = .init(startingUpdater: isRelease, updaterDelegate: updaterDelegate, userDriverDelegate: nil)
+        appDelegate.beforeTermination = {
+            await newModel.waitLogStoreToFinish()
+        }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(appViewModel)
+                .environment(newViewModel)
                 .onAppear {
                     TaskTimerManager.shared.connectToModel(viewModel: appViewModel)
                 }
@@ -86,8 +95,23 @@ final class MaaUpdaterDelegate: NSObject, SPUUpdaterDelegate {
 }
 
 private class AppDelegate: NSObject, NSApplicationDelegate {
+    fileprivate var beforeTermination: (() async -> Void)?
+    private var terminationTask: Task<Void, Never>?
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let beforeTermination else { return .terminateNow }
+        if terminationTask != nil { return .terminateLater }
+
+        terminationTask = Task {
+            await beforeTermination()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+
+        return .terminateLater
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

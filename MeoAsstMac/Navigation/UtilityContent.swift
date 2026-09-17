@@ -13,7 +13,9 @@ struct UtilityContent: View {
 
     var body: some View {
         List(UtilityEntry.allCases, selection: $selection) { entry in
-            entry.label
+            if entry != .video {
+                entry.label
+            }
         }
         .toolbar(content: listToolbar)
     }
@@ -34,10 +36,18 @@ struct UtilityContent: View {
                 }
                 .help("停止")
             case .idle:
-                Button(action: start) {
-                    Label("开始", systemImage: "play.fill")
+                switch selection {
+                case .recruit, .depot, .oper:
+                    Button(action: start) {
+                        Label("开始", systemImage: "play.fill")
+                    }
+                    .help("开始")
+                default:
+                    Button(action: {}) {
+                        Label("停止", systemImage: "stop.fill")
+                    }
+                    .disabled(true)
                 }
-                .help("开始")
             }
         }
     }
@@ -59,11 +69,7 @@ struct UtilityContent: View {
                 try await viewModel.recognizeDepot()
             case .oper:
                 try await viewModel.recognizeOperBox()
-            case .minigame:
-                break
-            case .video, .gacha:
-                break
-            case .none:
+            default:
                 break
             }
         }
@@ -88,6 +94,7 @@ enum UtilityEntry: Int, CaseIterable, Codable, Identifiable {
     case video
     case gacha
     case minigame
+    case maatools
 }
 
 extension UtilityEntry: CustomStringConvertible {
@@ -105,6 +112,8 @@ extension UtilityEntry: CustomStringConvertible {
             return String(localized: "干员寻访")
         case .minigame:
             return String(localized: "小游戏")
+        case .maatools:
+            return String(localized: "分辨率指南")
         }
     }
 
@@ -122,6 +131,8 @@ extension UtilityEntry: CustomStringConvertible {
             return "person.fill.viewfinder"
         case .minigame:
             return "gamecontroller.fill"
+        case .maatools:
+            return "macwindow"
         }
     }
 

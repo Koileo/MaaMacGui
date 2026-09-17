@@ -22,6 +22,10 @@ struct Sidebar: View {
             }
 
             VStack(alignment: .listRowSeparatorLeading, spacing: 12) {
+                Link(destination: URL(string: "https://docs.maa.plus/zh-cn/mac.html")!) {
+                    Label("帮助与公告…", systemImage: "questionmark.circle")
+                }
+
                 Button {
                     showUpdate.toggle()
                 } label: {
@@ -92,32 +96,5 @@ extension SidebarEntry: CustomStringConvertible {
 
     var label: some View {
         Label(description, systemImage: iconImage)
-    }
-}
-
-@available(macOS, introduced: 10.15, obsoleted: 14)
-private struct SettingsLink<Label: View>: View {
-    private let label: Label
-
-    init(@ViewBuilder label: () -> Label) {
-        self.label = label()
-    }
-
-    var body: some View {
-        if #available(macOS 14.0, *) {
-            SwiftUI.SettingsLink {
-                label
-            }
-        } else {
-            Button {
-                showSettings()
-            } label: {
-                label
-            }
-        }
-    }
-
-    private func showSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 }

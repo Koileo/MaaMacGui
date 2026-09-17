@@ -9,11 +9,12 @@ import SwiftUI
 
 struct TaskDetail: View {
     @EnvironmentObject private var viewModel: MAAViewModel
+    @Environment(NewViewModel.self) private var newModel
     let id: UUID?
 
     var body: some View {
         VStack {
-            switch viewModel.dailyTasksDetailMode {
+            switch newModel.dailyTasksDetailMode {
             case .taskConfig:
                 if let id, let task = viewModel.tasks[id] {
                     switch task {
@@ -73,15 +74,14 @@ struct TaskDetail: View {
             .help("添加任务")
         }
 
-        ToolbarItemGroup {
-            HStack {
-                Divider()
-
-                ViewDetaiTabButton(mode: .taskConfig, icon: "gearshape", selection: $viewModel.dailyTasksDetailMode)
-                ViewDetaiTabButton(mode: .log, icon: "note.text", selection: $viewModel.dailyTasksDetailMode)
-                ViewDetaiTabButton(
-                    mode: .timerConfig, icon: "clock.arrow.2.circlepath", selection: $viewModel.dailyTasksDetailMode)
+        ToolbarItem {
+            @Bindable var newModel = newModel
+            Picker("内容", selection: $newModel.dailyTasksDetailMode) {
+                Label("选项", systemImage: "gearshape").tag(MAAViewModel.DailyTasksDetailMode.taskConfig)
+                Label("日志", systemImage: "note.text").tag(MAAViewModel.DailyTasksDetailMode.log)
+                Label("定时", systemImage: "clock.arrow.2.circlepath").tag(MAAViewModel.DailyTasksDetailMode.timerConfig)
             }
+            .pickerStyle(.segmented)
         }
     }
 
@@ -93,24 +93,12 @@ struct TaskDetail: View {
     }
 }
 
-struct ViewDetaiTabButton: View {
-    let mode: MAAViewModel.DailyTasksDetailMode
-    let icon: String
-    @Binding var selection: MAAViewModel.DailyTasksDetailMode
-
-    var body: some View {
-        Button {
-            selection = mode
-        } label: {
-            Image(systemName: icon)
-                .foregroundColor(mode == selection ? Color.accentColor : nil)
-        }
-    }
-}
-
 struct TaskDetail_Previews: PreviewProvider {
     static var previews: some View {
+        let viewModel = MAAViewModel()
+        let newModel = NewViewModel(parent: viewModel)
         TaskDetail(id: nil)
             .environmentObject(MAAViewModel())
+            .environment(newModel)
     }
 }

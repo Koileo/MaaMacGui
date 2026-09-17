@@ -47,8 +47,8 @@ struct RecruitView: View {
                 }
             }
         }
-        .onChange(of: lv3ShortTime) { newValue in
-            viewModel.recruitConfig.recruitment_time["3"] = newValue ? 460 : 540
+        .onChange(of: lv3ShortTime) {
+            viewModel.recruitConfig.recruitment_time["3"] = $1 ? 460 : 540
         }
     }
 
@@ -56,7 +56,7 @@ struct RecruitView: View {
         Text(recruit.tags.joined(separator: ", "))
         List(recruit.result, id: \.tags.hashValue) { result in
             Section {
-                Text("\(result.opers.map(\.name).joined(separator: ", "))")
+                Text(result.opers.map(\.name).joined(separator: ", "))
             } header: {
                 Text("\(result.level)★ \(result.tags.joined(separator: " "))")
             }

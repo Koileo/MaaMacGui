@@ -21,12 +21,6 @@ import SwiftUI
     var medicineUsedTimes = 0
     var expiringMedicineUsedTimes = 0
 
-    /// Current sanity value before this fight(s)
-    var curSanityBeforeFight = 0
-
-    /// Sanity cost of current fight(s)
-    var sanityCost = 0
-
     @Published private(set) var status = Status.idle
 
     private var wakeupAssertionID: UInt32?
@@ -37,9 +31,7 @@ import SwiftUI
     // MARK: - Core Callback
 
     private var messageTask: Task<Void, Never>?
-    @Published var logs = [MAALog]()
-    @Published var trackTail = false
-    let fileLogger: FileLogger
+    weak var logStore: (any LogStore)?
 
     // MARK: - Daily Tasks
 
@@ -54,7 +46,6 @@ import SwiftUI
     @Published var tasks = [DailyTask]()
     @Published var taskIDMap: [Int32: UUID] = [:]
     @Published var newTaskAdded = false
-    @Published var dailyTasksDetailMode: DailyTasksDetailMode = .log
 
     enum TaskStatus: Equatable {
         case cancel
@@ -85,29 +76,20 @@ import SwiftUI
 
     @Published var scheduledDailyTaskTimers: [DailyTaskTimer] = []
 
-    // MARK: - Copilot
+    // MARK: - OTA Resources
 
-    enum CopilotDetailMode: Hashable {
-        case copilotConfig
-        case log
+    @Published private var stageActivities = [String: MAAStageActivity]()
+
+    var stageActivity: MAAStageActivity? {
+        stageActivities[clientChannel.rawValue]
     }
 
-    @Published var copilot: CopilotConfiguration?
-    @Published var copilotDefaults = RegularCopilotConfiguration(copilotList: [])
     @Published private(set) var lastCopilotRunSucceeded: Bool?
     var currentCopilotFileName: String?
-    @AppStorage("MAACopilotDefaults") private var serializedCopilotDefaults: String?
-    @Published var downloadCopilot: String?
-    @Published var showImportCopilot = false
-    @Published var copilotDetailMode: CopilotDetailMode = .log
-
     // MARK: - Recognition
 
     @Published var recruitConfig = RecruitConfiguration.recognition
     @Published var recruit: MAARecruit?
-    @Published var depot: MAADepot?
-    @Published var videoRecoginition: URL?
-    @Published var operBox: MAAOperBox?
 
     // MARK: - Connection Settings
 
@@ -117,7 +99,7 @@ import SwiftUI
 
     @AppStorage("MAAUseAdbLite") var useAdbLite = true
 
-    @AppStorage("MAAToolsMode") var toolsMode = MaaToolsMode.RGBA
+    @AppStorage("MAAToolsMode") var toolsMode = MaaToolsMode.BGR
 
     @AppStorage("MAATouchMode") var touchMode = MaaTouchMode.maatouch {
         didSet {
@@ -156,15 +138,6 @@ import SwiftUI
 
     init() {
         do {
-            fileLogger = try FileLogger(
-                url: Self.userDirectory.appendingPathComponent("debug", isDirectory: true)
-                    .appendingPathComponent("gui.log", isDirectory: false))
-        } catch {
-            fileLogger = FileLogger()
-            logError("日志文件出错: \(error.localizedDescription)")
-        }
-
-        do {
             let data = try Data(contentsOf: tasksURL)
             tasks = try PropertyListDecoder().decode([DailyTask].self, from: data)
         } catch {
@@ -191,43 +164,12 @@ import SwiftUI
         $status.sink(receiveValue: switchAwakeGuard).store(in: &cancellables)
 
         initScheduledDailyTaskTimer()
-        initCopilotDefaults()
     }
 
     deinit {
         messageTask?.cancel()
         Self.releaseAssertion(awakeAssertionID)
         Self.releaseAssertion(wakeupAssertionID)
-    }
-}
-
-// MARK: - Copilot Defaults
-
-extension MAAViewModel {
-    private func initCopilotDefaults() {
-        if let serializedCopilotDefaults,
-            let defaults = JSONHelper.json(from: serializedCopilotDefaults, of: RegularCopilotConfiguration.self)
-        {
-            copilotDefaults = defaults
-        }
-
-        $copilotDefaults
-            .dropFirst()
-            .sink { [weak self] defaults in
-                guard let self,
-                    let data = try? JSONEncoder().encode(defaults),
-                    let json = String(data: data, encoding: .utf8)
-                else { return }
-                self.serializedCopilotDefaults = json
-            }
-            .store(in: &cancellables)
-    }
-
-    func regularCopilotConfiguration(filename: String? = nil) -> RegularCopilotConfiguration {
-        var configuration = copilotDefaults
-        configuration.filename = filename
-        configuration.copilot_list = []
-        return configuration
     }
 }
 
@@ -253,6 +195,9 @@ extension MAAViewModel {
                     self?.processMessage(message)
                 }
             }
+        } else {
+            // 实例已存在时重新应用选项（如触控模式），使设置变更在下次连接即生效，无需重启应用。
+            try await handle?.apply(options: instanceOptions)
         }
 
         if await handle?.running == true {
@@ -267,7 +212,7 @@ extension MAAViewModel {
             throw MAAError.handleNotRunning
         }
 
-        logs.removeAll()
+        logStore?.clearLogs()
         taskIDMap.removeAll()
         taskStatus.removeAll()
 
@@ -280,6 +225,9 @@ extension MAAViewModel {
                 if toolsMode == .MacSCK && !CGPreflightScreenCaptureAccess() {
                     logError("未开启屏幕录制权限，请前往“系统设置” > “隐私与安全性” > “录屏与系统录音”允许MAA访问")
                 }
+            }
+            if toolsMode == .MacSCK {
+                logInfo("运行过程中，请勿将游戏设置为全屏幕、最小化，或移动窗口至其他显示器")
             }
 
             let connectionProfile: String
@@ -311,6 +259,15 @@ extension MAAViewModel {
         status = .idle
         medicineUsedTimes = 0
         expiringMedicineUsedTimes = 0
+
+        logStore?.screencapCost = nil
+        logStore?.lastScreencapWarningLevel = 0
+        logStore?.hasPrintedFPSHighTip = false
+        logStore?.taskStartTime = nil
+        logStore?.sanityReport = nil
+        logStore?.fightReport = nil
+        logStore?.stoneUsedTimes = 0
+        logStore?.recruitConfirmTimes = 0
     }
 
     func markPending() {
@@ -393,7 +350,7 @@ extension MAAViewModel {
         let otaFetcher = OTAFetcher()
         var files = [
             (path: "resource/tasks.json", name: "resource/tasks/tasks.json"),
-            (path: "gui/StageActivity.json", name: "gui/StageActivity.json"),
+            (path: "gui/StageActivityV2.json", name: "gui/StageActivityV2.json"),
         ]
         if channel.isGlobal {
             files.append(
@@ -410,6 +367,9 @@ extension MAAViewModel {
             }
             try await group.waitForAll()
         }
+        let data = try otaFetcher.data(name: "gui/StageActivityV2.json")
+        let decoder = JSONDecoder()
+        stageActivities = try decoder.decode([String: MAAStageActivity].self, from: data)
     }
 
     /// Load resources from bundled, user, and remote resources.
@@ -509,9 +469,10 @@ extension MAAViewModel {
 extension MAAViewModel {
     func tryStartTasks() async {
         do {
+            logStore?.setDailyTasksDetailMode(.log)
             try await startTasks()
         } catch {
-            logError("ConnectFailed")
+            logError("StartTasksFailed: \(String(describing: error))")
             logInfo("CheckSettings")
         }
     }
@@ -557,6 +518,7 @@ extension MAAViewModel {
         }
 
         try await handle?.start()
+        logStore?.taskStartTime = .now
 
         status = .busy
     }
@@ -597,27 +559,14 @@ extension MAAViewModel {
 // MARK: Copilot
 
 extension MAAViewModel {
-    func startCopilot() async throws {
+    func startCopilot(type: MAATaskType, params: String) async throws {
         status = .pending
         lastCopilotRunSucceeded = nil
         currentCopilotFileName = nil
         defer { handleEarlyReturn(backTo: .idle) }
 
-        guard let copilot,
-            let params = copilot.params
-        else {
-            return
-        }
-
         try await ensureHandle()
-
-        switch copilot {
-        case .regular:
-            _ = try await handle?.appendTask(type: .Copilot, params: params)
-        case .sss:
-            _ = try await handle?.appendTask(type: .SSSCopilot, params: params)
-        }
-
+        try await _ = handle?.appendTask(type: type, params: params)
         try await handle?.start()
 
         status = .busy
@@ -701,13 +650,13 @@ extension MAAViewModel {
         status = .busy
     }
 
-    func miniGame(name: String) async throws {
+    func miniGame(name: String, params: Any? = nil) async throws {
         status = .pending
         defer { handleEarlyReturn(backTo: .idle) }
 
         try await ensureHandle()
 
-        let params = ["task_names": [name]]
+        let params = ["task_names": [name], "params": params]
         let data = try JSONSerialization.data(withJSONObject: params)
         let string = String(data: data, encoding: .utf8)
 

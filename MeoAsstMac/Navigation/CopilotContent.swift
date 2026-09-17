@@ -5,10 +5,30 @@
 //  Created by hguandl on 17/4/2023.
 //
 
-import SwiftUI
 import Security
+import SwiftUI
+import UniformTypeIdentifiers
 
 struct CopilotContent: View {
+    @Environment(NewViewModel.self) var newModel
+    @EnvironmentObject private var viewModel: MAAViewModel
+
+    struct Item: FileTreeItem {
+        let url: URL
+        let id: CopilotContext.ItemID
+
+        init(url: URL) {
+            self.url = url
+            self.id = .init(url: url, isRaid: nil)
+        }
+
+        var children: [Item]?
+
+        var name: String {
+            url.deletingPathExtension().lastPathComponent
+        }
+    }
+
     private struct QueuedCopilot: Identifiable, Equatable {
         let id: UUID
         let url: URL
@@ -19,11 +39,7 @@ struct CopilotContent: View {
             self.id = id
             self.url = url
             self.filename = url.lastPathComponent
-            if let copilot = MAACopilot(url: url) {
-                self.stageName = copilot.navigationStageName
-            } else {
-                self.stageName = url.lastPathComponent
-            }
+            self.stageName = MAACopilot(url: url)?.navigationStageName ?? url.lastPathComponent
         }
     }
 
@@ -36,10 +52,9 @@ struct CopilotContent: View {
         var id: Self { self }
     }
 
-    @EnvironmentObject private var viewModel: MAAViewModel
-    @Binding var selection: URL?
-
-    @State private var copilots = Set<URL>()
+    @State private var bundledRoot = Item(url: .bundledCopilotDirectory)
+    @State private var externalRoot = Item(url: .externalCopilotDirectory)
+    @State private var tracker = FileTreeTracker()
     @State private var copilotQueue = [QueuedCopilot]()
     @State private var battleMode = BattleMode.single
     @State private var useAutomaticFallbacks = false
@@ -49,134 +64,186 @@ struct CopilotContent: View {
     @State private var operatorMatchingEnabled = false
     @State private var operatorSyncError: String?
     @State private var failedCopilotCount = 0
-    @State private var downloading = false
     @State private var copilotSetCode = ""
     @State private var copilotSetStatus: String?
     @State private var importingCopilotSet = false
     @State private var barkTestStatus: String?
     @State private var testingBark = false
-    @State private var expanded = false
     @AppStorage("MAAMainStoryStart") private var mainStoryStart = "main_05-01"
     @AppStorage("MAAMainStoryEnd") private var mainStoryEnd = MainStoryStage.all.last?.id ?? ""
     @AppStorage("MAAResourceStageLine") private var resourceStageLine = ResourceStageLine.all.first?.id ?? "CE"
     @AppStorage("MAAResourceStageStart") private var resourceStageStart = "CE-1"
     @AppStorage("MAAResourceStageEnd") private var resourceStageEnd = "CE-6"
     @AppStorage("MAAAutomaticStageBattleCount") private var automaticStageBattleCount = 1
+    @AppStorage("MAAMainStoryBarkEndpoint") private var barkEndpoint = ""
     @State private var mainStoryProgress = ""
     @State private var mainStoryTask: Task<Void, Never>?
-    @AppStorage("MAAMainStoryBarkEndpoint") private var barkEndpoint = ""
 
     var body: some View {
+        @Bindable var context = newModel.copilot
         VStack(spacing: 0) {
             battleModeControls
             Divider()
 
-            List(selection: $selection) {
+            List(selection: $context.selection) {
+                if battleMode == .queue {
+                    queueSection
+                }
 
-            if battleMode == .queue {
-                Section("战斗列表（从关卡地图开始）") {
-                    if copilotQueue.isEmpty {
-                        Text("请从下方选择作业并点按添加")
-                            .foregroundStyle(.secondary)
+                switch context.category {
+                case .bundled:
+                    FileTreeRoot(item: $bundledRoot, tracker: tracker) {
+                        Text($0.name)
                     }
-
-                    ForEach(Array(copilotQueue.enumerated()), id: \.element.id) { index, item in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(item.stageName)
-                                Text(item.filename)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            Button {
-                                moveQueuedCopilot(at: index, offset: -1)
-                            } label: {
-                                Image(systemName: "chevron.up")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("上移")
-                            .disabled(index == copilotQueue.startIndex)
-
-                            Button {
-                                moveQueuedCopilot(at: index, offset: 1)
-                            } label: {
-                                Image(systemName: "chevron.down")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("下移")
-                            .disabled(index == copilotQueue.index(before: copilotQueue.endIndex))
-
-                            Button {
-                                removeQueuedCopilot(at: index)
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("从战斗列表移除")
-                        }
-                        .tag(item.url)
+                case .external:
+                    FileTreeRoot(item: $externalRoot, tracker: tracker) {
+                        Text($0.name)
                     }
+                case .list:
+                    CopilotListContent(context: context)
                 }
             }
-
-                DisclosureGroup(isExpanded: $expanded) {
-                    ForEach(bundledCopilots, id: \.self) { url in
-                        Text(url.lastPathComponent)
-                    }
-                } label: {
-                    Text("内置作业")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            withAnimation {
-                                expanded.toggle()
-                            }
-                        }
+            .contextMenu(forSelectionType: CopilotContext.ItemID.self) { _ in
+                EmptyView()
+            } primaryAction: { ids in
+                if context.category == .list {
+                    context.selection = nil
+                    return
                 }
-
-                Section {
-                    ForEach(copilots.urls, id: \.self) { url in
-                        Text(url.lastPathComponent)
-                    }
-                } header: {
-                    HStack {
-                        Text("外部作业（可拖入文件）")
-                        if downloading {
-                            Spacer()
-                            ProgressView().controlSize(.small)
-                        }
-                    }
+                if let url = ids.first?.url {
+                    tracker.sendURLAction(of: url)
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 6) {
+                CapsulePicker(CopilotCategory.allCases, selection: $context.category, color: \.color) {
+                    Image(systemName: $0.systemImage)
+                } text: {
+                    Text($0.title)
+                } action: {
+                    context.selection = nil
+                }
+                .padding(.horizontal)
+                .padding(.top, 6)
+                .background(.background)
+            }
+            .safeAreaInset(edge: .bottom) {
+                if context.category == .list {
+                    CopilotListControls(context: context)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity)
+                        .background(.background)
                 }
             }
         }
-        .toolbar(content: listToolbar)
-        .animation(.default, value: copilots)
-        .animation(.default, value: downloading)
+        .toolbar {
+            if battleMode == .queue {
+                ToolbarItemGroup {
+                    Button(action: addSelectedCopilotToQueue) {
+                        Label("添加到战斗列表", systemImage: "text.badge.plus")
+                    }
+                    .help("添加到战斗列表")
+                    .disabled(!canAddSelectedCopilotToQueue)
+
+                    Button(action: { copilotQueue.removeAll() }) {
+                        Label("清空战斗列表", systemImage: "clear")
+                    }
+                    .help("清空战斗列表")
+                    .disabled(copilotQueue.isEmpty)
+                }
+            }
+            CopilotListToolbar(
+                externalRoot: $externalRoot,
+                isAutomaticRunning: mainStoryTask != nil,
+                canStart: canStart,
+                startAction: start,
+                stopAction: stop)
+        }
+        .task(id: context.category) {
+            switch context.category {
+            case .bundled:
+                await refreshItem(at: \.$bundledRoot)
+            case .external:
+                await refreshItem(at: \.$externalRoot)
+            case .list:
+                break
+            }
+        }
+        .task(id: newModel.lastImportedCopilot) {
+            guard let url = newModel.lastImportedCopilot else { return }
+            defer { newModel.lastImportedCopilot = nil }
+            context.selection = .init(url: url, isRaid: nil)
+            if url.isDirectory {
+                await context.updateSet(at: url)
+                context.category = .list
+            } else {
+                await refreshItem(at: \.$externalRoot)
+                context.category = .external
+            }
+        }
+        .onChange(of: context.copilotList.isEmpty, initial: true) {
+            if $1, context.category == .list {
+                context.category = .external
+                context.selection = nil
+            }
+        }
         .onAppear {
-            loadUserCopilots()
             ownedOperatorNames = OperatorRosterStore.names
             operatorMatchingEnabled = OperatorRosterStore.matchingEnabled
             failedCopilotCount = FailedCopilotStore.ids.count
         }
-        .onDrop(of: [.fileURL], isTargeted: .none, perform: addCopilots)
-        .onReceive(viewModel.$copilotDetailMode, perform: deselectCopilot)
-        .onReceive(viewModel.$downloadCopilot, perform: downloadCopilot)
-        .onReceive(viewModel.$videoRecoginition, perform: selectNewCopilot)
-        .fileImporter(
-            isPresented: $viewModel.showImportCopilot,
-            allowedContentTypes: [.json],
-            allowsMultipleSelection: true,
-            onCompletion: addCopilots)
+        .onDrop(of: [.json], isTargeted: .none, perform: addCopilots)
         .sheet(isPresented: $showOperatorSettings, content: operatorSettings)
     }
 
+    @ViewBuilder private var queueSection: some View {
+        Section("战斗列表（从关卡地图开始）") {
+            if copilotQueue.isEmpty {
+                Text("请从下方选择作业并点按添加")
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(Array(copilotQueue.enumerated()), id: \.element.id) { index, item in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(item.stageName)
+                        Text(item.filename)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        moveQueuedCopilot(at: index, offset: -1)
+                    } label: {
+                        Image(systemName: "chevron.up")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("上移")
+                    .disabled(index == copilotQueue.startIndex)
+
+                    Button {
+                        moveQueuedCopilot(at: index, offset: 1)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("下移")
+                    .disabled(index == copilotQueue.index(before: copilotQueue.endIndex))
+
+                    Button {
+                        removeQueuedCopilot(at: index)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("从战斗列表移除")
+                }
+                .tag(CopilotContext.ItemID(url: item.url, isRaid: nil))
+            }
+        }
+    }
+
     @ViewBuilder private var battleModeControls: some View {
+        @Bindable var context = newModel.copilot
         VStack(alignment: .leading, spacing: 10) {
             Picker("作战模式", selection: $battleMode) {
                 ForEach(BattleMode.allCases) { mode in
@@ -202,11 +269,6 @@ struct CopilotContent: View {
                 Text("从所选起点开始推进；不会读取账号的历史通关记录。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if !mainStoryProgress.isEmpty {
-                    Text(mainStoryProgress)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             }
 
             if battleMode == .resources {
@@ -215,7 +277,7 @@ struct CopilotContent: View {
                         Text(line.name).tag(line.id)
                     }
                 }
-                .onChange(of: resourceStageLine) { _ in resetResourceStageRange() }
+                .onChange(of: resourceStageLine) { resetResourceStageRange() }
 
                 HStack {
                     Picker("起始", selection: $resourceStageStart) {
@@ -232,11 +294,6 @@ struct CopilotContent: View {
                 Text("资源线独立推进；当天未开放或尚未解锁时会停止并提示。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if !mainStoryProgress.isEmpty {
-                    Text(mainStoryProgress)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             }
 
             if battleMode == .mainStory || battleMode == .resources {
@@ -244,6 +301,12 @@ struct CopilotContent: View {
                     Text("每关战斗次数：\(automaticStageBattleCount)")
                 }
                 .help("当前关卡成功完成指定次数后，再进入下一关。")
+            }
+
+            if !mainStoryProgress.isEmpty, battleMode == .mainStory || battleMode == .resources {
+                Text(mainStoryProgress)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if battleMode != .single {
@@ -267,23 +330,21 @@ struct CopilotContent: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+
                 Toggle("自动搜索备用作业", isOn: $useAutomaticFallbacks)
                     .help("从 PRTS.plus 按热度下载同关卡作业；当前作业失败或漏怪时自动切换。")
-                if useAutomaticFallbacks || battleMode == .mainStory || battleMode == .resources {
-                    Button {
-                        operatorToken = OperatorRosterStore.token ?? ""
-                        showOperatorSettings = true
-                    } label: {
-                        Label(operatorSettingsLabel, systemImage: "person.2")
-                    }
-                    .buttonStyle(.plain)
+                Button {
+                    operatorToken = OperatorRosterStore.token ?? ""
+                    showOperatorSettings = true
+                } label: {
+                    Label(operatorSettingsLabel, systemImage: "person.2")
                 }
+                .buttonStyle(.plain)
                 Toggle(
                     "漏怪时退出并重试",
                     isOn: Binding(
-                        get: { viewModel.copilotDefaults.retry_on_leak ?? false },
-                        set: { viewModel.copilotDefaults.retry_on_leak = $0 }
-                    )
+                        get: { context.config.retry_on_leak ?? false },
+                        set: { context.config.retry_on_leak = $0 })
                 )
                 .help("检测到目标生命降低时退出当前作战，并重试一次。允许战术漏怪的作业请勿启用。")
             }
@@ -291,68 +352,70 @@ struct CopilotContent: View {
         .padding(12)
     }
 
-    // MARK: - Toolbar
+    // MARK: - Actions
 
-    @ToolbarContentBuilder private func listToolbar() -> some ToolbarContent {
-        ToolbarItemGroup {
-            if battleMode == .queue {
-                Button(action: addSelectedCopilotToQueue) {
-                    Label("添加到战斗列表", systemImage: "text.badge.plus")
-                }
-                .help("添加到战斗列表")
-                .disabled(!canAddSelectedCopilotToQueue)
-
-                Button(action: { copilotQueue.removeAll() }) {
-                    Label("清空战斗列表", systemImage: "clear")
-                }
-                .help("清空战斗列表")
-                .disabled(copilotQueue.isEmpty)
-            }
-
-            Button(action: deleteSelectedCopilot) {
-                Label("移除", systemImage: "trash")
-            }
-            .help("移除作业")
-            .disabled(shouldDisableDeletion)
-            .keyboardShortcut(.delete, modifiers: [.command])
-        }
-
-        ToolbarItemGroup {
-            switch (viewModel.status, mainStoryTask != nil) {
-            case (.pending, false):
-                Button(action: {}) {
-                    ProgressView().controlSize(.small)
-                }
-                .disabled(true)
-            case (.pending, true), (.busy, _), (.idle, true):
-                Button(action: stop) {
-                    Label("停止", systemImage: "stop.fill")
-                }
-                .help("停止")
-            case (.idle, false):
-                Button(action: start) {
-                    Label("开始", systemImage: "play.fill")
-                }
-                .help("开始")
-                .disabled(battleMode == .queue && copilotQueue.isEmpty)
-            }
-        }
+    private func refreshItem(at keyPath: KeyPath<Self, Binding<Item>>) async {
+        let binding = self[keyPath: keyPath]
+        let newChildren = try? await binding.wrappedValue.children()
+        binding.wrappedValue.children = newChildren ?? []
     }
 
-    // MARK: - Actions
+    private func addCopilots(_ providers: [NSItemProvider]) -> Bool {
+        let canLoadAll = providers.allSatisfy {
+            $0.hasItemConformingToTypeIdentifier(UTType.json.identifier)
+        }
+        guard !providers.isEmpty, canLoadAll else { return false }
+
+        let (stream, continuation) = AsyncStream<Result<URL, Error>>.makeStream()
+        for provider in providers {
+            provider.loadItem(forTypeIdentifier: UTType.json.identifier) { item, error in
+                if let error {
+                    continuation.yield(.failure(error))
+                } else if let url = item as? URL {
+                    continuation.yield(.success(url))
+                } else {
+                    continuation.yield(.failure(CocoaError(.fileReadUnknown)))
+                }
+            }
+        }
+
+        Task.detached { [total = providers.count] in
+            var count = 0
+            for await result in stream {
+                count += 1
+                if count == total { continuation.finish() }
+                do {
+                    let url = try result.get()
+                    try await addCopilot(url: url)
+                } catch {
+                    print(error)
+                }
+            }
+        }
+        return true
+    }
+
+    private func addCopilot(url: URL) async throws {
+        guard url.isFileURL, let type = url.contentType else { return }
+        switch type {
+        case _ where type.conforms(to: .json):
+            async let dest = try FileManager.default.copyCopilotToExternalDirectory(at: url)
+            newModel.lastImportedCopilot = try await dest
+        case _ where type.conforms(to: .movie):
+            try await newModel.recognizeVideo(url: url)
+        default:
+            break
+        }
+    }
 
     private func stop() {
         mainStoryTask?.cancel()
         guard viewModel.status != .idle else { return }
-        Task {
-            try await viewModel.stop()
-        }
+        Task { try await newModel.stop() }
     }
 
     private func start() {
         viewModel.markPending()
-        viewModel.copilotDetailMode = .log
-
         if battleMode == .mainStory || battleMode == .resources {
             mainStoryTask?.cancel()
             mainStoryTask = Task {
@@ -368,38 +431,39 @@ struct CopilotContent: View {
         Task {
             do {
                 if battleMode == .queue {
-                    if useAutomaticFallbacks {
-                        viewModel.logInfo("正在从 PRTS.plus 检索候选备用作业...")
-                    }
-                    let queueUrls = copilotQueue.map(\.url)
-                    let urls = useAutomaticFallbacks
-                        ? try await automaticFallbacks(for: queueUrls)
-                        : queueUrls
-                    let items = urls.compactMap { url -> RegularCopilotConfiguration.CopilotItem? in
-                        guard let copilot = MAACopilot(url: url), copilot.type != "SSS" else { return nil }
-                        return .init(filename: url.path, stage_name: copilot.navigationStageName, is_raid: false)
-                    }
-
-                    guard items.count == urls.count else {
-                        viewModel.logError("队列中存在无法读取或格式不支持的作业")
-                        viewModel.resetStatus()
-                        return
-                    }
-
-                    var configuration = viewModel.regularCopilotConfiguration()
-                    configuration.copilot_list = items
-                    configuration.switch_copilot_on_failure = useAutomaticFallbacks
-                    viewModel.copilot = .regular(configuration)
-                } else if let selection, MAACopilot(url: selection)?.type != "SSS" {
-                    viewModel.copilot = .regular(viewModel.regularCopilotConfiguration(filename: selection.path))
+                    try await runQueue()
+                } else {
+                    try await newModel.startCopilot()
                 }
-
-                try await viewModel.startCopilot()
             } catch {
                 viewModel.logError("启动自动战斗失败：\(error.localizedDescription)")
                 viewModel.resetStatus()
             }
         }
+    }
+
+    private func runQueue() async throws {
+        if useAutomaticFallbacks {
+            viewModel.logInfo("正在从 PRTS.plus 检索候选备用作业...")
+        }
+        let seeds = copilotQueue.map(\.url)
+        let urls = useAutomaticFallbacks ? try await automaticFallbacks(for: seeds) : seeds
+        let items = urls.compactMap { url -> CopilotConfiguration.CopilotItem? in
+            guard let copilot = MAACopilot(url: url), copilot.type != "SSS" else { return nil }
+            return .init(
+                filename: url.path(percentEncoded: false),
+                nav_name_override: copilot.navigationStageName,
+                is_raid: false)
+        }
+        guard items.count == urls.count else {
+            throw PRTSPlusError.api("队列中存在无法读取或格式不支持的作业")
+        }
+
+        var configuration = newModel.copilot.config
+        configuration.filename = nil
+        configuration.copilot_list = items
+        configuration.switch_copilot_on_failure = useAutomaticFallbacks
+        try await startCopilot(configuration)
     }
 
     @MainActor private func runMainStory() async {
@@ -414,7 +478,6 @@ struct CopilotContent: View {
             let stages = Array(MainStoryStage.all[start...end]).map { ($0.stageId, $0.code) }
             let battleCount = automaticStageBattleCount
             try await runAutomaticStages(stages, battleCount: battleCount)
-
             mainStoryProgress = "已完成 \(stages.count) 个主线关卡，共 \(stages.count * battleCount) 次战斗"
             mainStoryTask = nil
         } catch {
@@ -444,8 +507,7 @@ struct CopilotContent: View {
             let stages = Array(line.stages[start...end]).map { ($0.stageId, $0.code) }
             let battleCount = automaticStageBattleCount
             try await runAutomaticStages(stages, battleCount: battleCount)
-            mainStoryProgress =
-                "已完成 \(line.name)资源线（\(stages.count) 关，共 \(stages.count * battleCount) 次战斗）"
+            mainStoryProgress = "已完成 \(line.name)资源线（\(stages.count) 关，共 \(stages.count * battleCount) 次战斗）"
             mainStoryTask = nil
         } catch {
             if Task.isCancelled {
@@ -477,19 +539,18 @@ struct CopilotContent: View {
                     ownedOperatorNames: names,
                     limit: 5)
             } catch let error as PRTSPlusError {
-                if operatorMatchingEnabled && viewModel.copilotDefaults.ignore_requirements {
-                    urls = (try? await PRTSPlusClient.candidates(
-                        for: stage.id,
-                        excluding: FailedCopilotStore.ids,
-                        ownedOperatorNames: [],
-                        limit: 5)) ?? []
+                if operatorMatchingEnabled && newModel.copilot.config.ignore_requirements {
+                    urls =
+                        (try? await PRTSPlusClient.candidates(
+                            for: stage.id,
+                            excluding: FailedCopilotStore.ids,
+                            ownedOperatorNames: [],
+                            limit: 5)) ?? []
                     if !urls.isEmpty {
                         viewModel.logWarn("关卡 \(stage.code) 本地干员匹配未完全满足，已按「忽视干员属性要求」降级使用候选作业")
                     }
                 }
-                if urls.isEmpty {
-                    throw error
-                }
+                if urls.isEmpty { throw error }
             }
             guard !urls.isEmpty else { throw PRTSPlusError.noCopilot(stage.code) }
 
@@ -504,16 +565,18 @@ struct CopilotContent: View {
             while completedBattles < battleCount && candidateIndex < urls.count {
                 try Task.checkCancellation()
                 let url = urls[candidateIndex]
-                var configuration = viewModel.regularCopilotConfiguration()
+                var configuration = newModel.copilot.config
+                configuration.filename = nil
                 configuration.copilot_list = [
-                    .init(filename: url.path, stage_name: stage.code, is_raid: false)
+                    .init(
+                        filename: url.path(percentEncoded: false),
+                        nav_name_override: stage.code,
+                        is_raid: false)
                 ]
                 configuration.switch_copilot_on_failure = true
-                viewModel.copilot = .regular(configuration)
-                viewModel.copilotDetailMode = .log
                 mainStoryProgress =
                     "正在作战：\(stage.code)（第 \(completedBattles + 1)/\(battleCount) 次，作业 \(candidateIndex + 1)/\(urls.count)）"
-                try await viewModel.startCopilot()
+                try await startCopilot(configuration)
 
                 if try await viewModel.waitUntilCopilotCompleted() {
                     completedBattles += 1
@@ -535,6 +598,13 @@ struct CopilotContent: View {
                     "关卡 \(stage.code) 仅完成 \(completedBattles)/\(battleCount) 次，候选作业均不可用")
             }
         }
+    }
+
+    private func startCopilot(_ configuration: CopilotConfiguration) async throws {
+        guard let params = try? configuration.jsonString() else {
+            throw PRTSPlusError.api("作业配置序列化失败")
+        }
+        try await viewModel.startCopilot(type: .Copilot, params: params)
     }
 
     private var selectedResourceLine: ResourceStageLine {
@@ -561,74 +631,36 @@ struct CopilotContent: View {
     }
 
     @ViewBuilder private func operatorSettings() -> some View {
+        @Bindable var context = newModel.copilot
         VStack(alignment: .leading, spacing: 16) {
             Text("配队与干员匹配").font(.headline)
-            Toggle("自动编队", isOn: $viewModel.copilotDefaults.formation)
-            if viewModel.copilotDefaults.formation {
+            Toggle("自动编队", isOn: $context.config.formation)
+            if context.config.formation {
                 HStack {
-                    Picker("编队栏位", selection: $viewModel.copilotDefaults.formation_index) {
+                    Picker("编队栏位", selection: $context.config.formation_index) {
                         Text("当前").tag(0)
-                        ForEach(0..<RegularCopilotConfiguration.formationCount, id: \.self) { index in
-                            Text("\(index + 1)").tag(index + 1)
+                        ForEach(1...4, id: \.self) { index in
+                            Text("\(index)").tag(index)
                         }
                     }
                     .pickerStyle(.menu)
-                    Toggle("忽视干员属性要求", isOn: $viewModel.copilotDefaults.ignore_requirements)
+                    Toggle("忽视干员属性要求", isOn: $context.config.ignore_requirements)
                 }
-
-                Toggle("补充低信赖干员", isOn: $viewModel.copilotDefaults.add_trust)
-
+                Toggle("补充低信赖干员", isOn: $context.config.add_trust)
                 HStack {
-                    Picker("助战模式", selection: $viewModel.copilotDefaults.support_unit_usage) {
-                        ForEach(RegularCopilotConfiguration.SupportUnitUsage.allCases, id: \.self) { mode in
+                    Picker("助战模式", selection: $context.config.support_unit_usage) {
+                        ForEach(CopilotConfiguration.SupportUnitUsage.allCases, id: \.self) { mode in
                             Text(mode.description).tag(mode)
                         }
                     }
                     .pickerStyle(.menu)
-
-                    if viewModel.copilotDefaults.support_unit_usage == .specific {
-                        TextField("助战干员名称", text: $viewModel.copilotDefaults.support_unit_name)
+                    if context.config.support_unit_usage == .specific {
+                        TextField("助战干员名称", text: $context.config.support_unit_name)
                             .textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("指定信赖干员")
-                        Spacer()
-                        Button {
-                            viewModel.copilotDefaults.user_additional.append(.init(name: "", skill: 1))
-                        } label: {
-                            Label("添加", systemImage: "plus")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("添加指定干员")
-                    }
-
-                    ForEach(viewModel.copilotDefaults.user_additional.indices, id: \.self) { index in
-                        HStack {
-                            TextField(
-                                "干员名称",
-                                text: $viewModel.copilotDefaults.user_additional[index].name
-                            )
-                            .textFieldStyle(.roundedBorder)
-                            Picker("技能", selection: $viewModel.copilotDefaults.user_additional[index].skill) {
-                                Text("技能 1").tag(1)
-                                Text("技能 2").tag(2)
-                                Text("技能 3").tag(3)
-                            }
-                            .frame(width: 100)
-                            Button {
-                                viewModel.copilotDefaults.user_additional.remove(at: index)
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("移除指定干员")
-                        }
                     }
                 }
             }
+
             Text("Token 保存到系统钥匙串，仅用于直接向明日方舟一图流同步干员数据，不会发送至 PRTS.plus。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -692,13 +724,8 @@ struct CopilotContent: View {
         }
         .padding(24)
         .frame(width: 520)
-        .onAppear {
-            ownedOperatorNames = OperatorRosterStore.names
-            operatorMatchingEnabled = OperatorRosterStore.matchingEnabled
-            failedCopilotCount = FailedCopilotStore.ids.count
-        }
-        .onChange(of: operatorMatchingEnabled) { value in
-            OperatorRosterStore.matchingEnabled = value
+        .onChange(of: operatorMatchingEnabled) {
+            OperatorRosterStore.matchingEnabled = $1
         }
     }
 
@@ -740,26 +767,24 @@ struct CopilotContent: View {
             guard let copilot = MAACopilot(url: url), copilot.type != "SSS" else { return nil }
             return (url, copilot)
         }
-
         let names = operatorMatchingEnabled ? ownedOperatorNames : []
         return try await withThrowingTaskGroup(of: (Int, URL, [URL]).self) { group in
             for (index, (seed, copilot)) in validSeeds.enumerated() {
                 group.addTask {
                     let seedID = Int(seed.deletingPathExtension().lastPathComponent)
                     let excluding: Set<Int> = seedID.map { [$0] } ?? []
-                    let fallbacks = (try? await PRTSPlusClient.fallbacks(
-                        for: copilot,
-                        excluding: excluding,
-                        ownedOperatorNames: names)) ?? []
+                    let fallbacks =
+                        (try? await PRTSPlusClient.fallbacks(
+                            for: copilot,
+                            excluding: excluding,
+                            ownedOperatorNames: names)) ?? []
                     return (index, seed, fallbacks)
                 }
             }
 
             var indexedResults: [(Int, [URL])] = []
             for try await (index, seed, fallbacks) in group {
-                var list = [seed]
-                list.append(contentsOf: fallbacks)
-                indexedResults.append((index, list))
+                indexedResults.append((index, [seed] + fallbacks))
             }
             indexedResults.sort { $0.0 < $1.0 }
             return indexedResults.flatMap(\.1)
@@ -767,8 +792,8 @@ struct CopilotContent: View {
     }
 
     private func addSelectedCopilotToQueue() {
-        guard let selection, canAddSelectedCopilotToQueue else { return }
-        copilotQueue.append(QueuedCopilot(url: selection))
+        guard let url = newModel.copilot.selection?.url, canAddSelectedCopilotToQueue else { return }
+        copilotQueue.append(QueuedCopilot(url: url))
     }
 
     private func importCopilotSet() {
@@ -787,13 +812,15 @@ struct CopilotContent: View {
                 guard !regular.isEmpty else {
                     throw PRTSPlusError.api("作业集中没有可用于连续作战的普通作业")
                 }
-                copilots.formUnion(regular)
                 copilotQueue.append(contentsOf: regular.map { QueuedCopilot(url: $0) })
                 copilotSetCode = ""
                 let skipped = downloaded.count - regular.count
-                copilotSetStatus = skipped == 0
+                copilotSetStatus =
+                    skipped == 0
                     ? "已按原顺序导入 \(regular.count) 份作业"
                     : "已导入 \(regular.count) 份普通作业，跳过 \(skipped) 份保全作业"
+                let children = try? await externalRoot.children()
+                externalRoot.children = children ?? []
             } catch {
                 copilotSetStatus = "导入失败：\(error.localizedDescription)"
             }
@@ -809,260 +836,208 @@ struct CopilotContent: View {
     private func removeQueuedCopilot(at index: Int) {
         guard copilotQueue.indices.contains(index) else { return }
         let removed = copilotQueue.remove(at: index)
-        if selection == removed.url {
-            if copilotQueue.indices.contains(index) {
-                selection = copilotQueue[index].url
-            } else {
-                selection = copilotQueue.last?.url
-            }
+        if newModel.copilot.selection?.url == removed.url {
+            let next = copilotQueue.indices.contains(index) ? copilotQueue[index] : copilotQueue.last
+            newModel.copilot.selection = next.map { .init(url: $0.url, isRaid: nil) }
         }
-    }
-
-    private func loadUserCopilots() {
-        copilots.formUnion(externalDirectory.copilots)
-        copilots.formUnion(recordingDirectory.copilots)
-    }
-
-    private func addCopilots(_ providers: [NSItemProvider]) -> Bool {
-        Task {
-            for provider in providers {
-                if let url = try? await provider.loadURL() {
-                    let value = try? url.resourceValues(forKeys: [.contentTypeKey])
-                    if value?.contentType == .json {
-                        copilots.insert(url)
-                    } else if value?.contentType?.conforms(to: .movie) == true {
-                        try? await viewModel.recognizeVideo(video: url)
-                    }
-                }
-            }
-            self.selection = self.copilots.urls.last
-        }
-
-        return true
-    }
-
-    private func addCopilots(_ results: Result<[URL], Error>) {
-        if case let .success(urls) = results {
-            copilots.formUnion(urls)
-            selection = copilots.urls.last
-        }
-    }
-
-    private func downloadCopilot(id: String?) {
-        guard let id else { return }
-
-        let file =
-            externalDirectory
-            .appendingPathComponent(id)
-            .appendingPathExtension("json")
-
-        let url = URL(string: "https://prts.maa.plus/copilot/get/\(id)")!
-        Task {
-            self.downloading = true
-            do {
-                let data = try await URLSession.shared.data(from: url).0
-                let response = try JSONDecoder().decode(CopilotResponse.self, from: data)
-                try response.data.content.write(toFile: file.path, atomically: true, encoding: .utf8)
-                copilots.insert(file)
-                self.selection = file
-            } catch {
-                print(error)
-            }
-            self.downloading = false
-        }
-    }
-
-    private func deleteCopilot(url: URL) {
-        copilots.remove(url)
-        copilotQueue.removeAll { $0.url == url }
-        guard canDelete(url) else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    private func deleteSelectedCopilot() {
-        guard let selection else { return }
-
-        if battleMode == .queue, let queueIndex = copilotQueue.firstIndex(where: { $0.url == selection }) {
-            removeQueuedCopilot(at: queueIndex)
-            return
-        }
-
-        guard let index = copilots.urls.firstIndex(of: selection) else { return }
-
-        deleteCopilot(url: selection)
-
-        let urls = copilots.urls
-        if index < urls.count {
-            self.selection = urls[index]
-        } else {
-            self.selection = urls.last
-        }
-    }
-
-    private func deselectCopilot(_ viewMode: MAAViewModel.CopilotDetailMode) {
-        if viewMode != .copilotConfig {
-            selection = nil
-        }
-    }
-
-    private func selectNewCopilot(url: URL?) {
-        if let url {
-            copilots.insert(url)
-            selection = copilots.urls.last
-        }
-    }
-
-    // MARK: - State Wrappers
-
-    private var shouldDisableDeletion: Bool {
-        if battleMode == .queue, let selection, copilotQueue.contains(where: { $0.url == selection }) {
-            return false
-        }
-        return selection == nil || isBundled(selection)
     }
 
     private var canAddSelectedCopilotToQueue: Bool {
-        guard let selection,
-            battleMode == .queue,
-            !copilotQueue.contains(where: { $0.url == selection }),
-            let copilot = MAACopilot(url: selection)
+        guard battleMode == .queue,
+            let url = newModel.copilot.selection?.url,
+            !copilotQueue.contains(where: { $0.url == url }),
+            let copilot = MAACopilot(url: url)
         else { return false }
-
         return copilot.type != "SSS"
     }
 
-    private func isBundled(_ url: URL?) -> Bool {
-        return url?.path.starts(with: bundledDirectory.path) ?? false
+    private var canStart: Bool {
+        switch battleMode {
+        case .single:
+            newModel.copilot.isReady
+        case .queue:
+            !copilotQueue.isEmpty
+        case .mainStory, .resources:
+            true
+        }
     }
+}
 
-    private func canDelete(_ url: URL?) -> Bool {
-        [externalDirectory, recordingDirectory]
-            .compactMap { url?.path.starts(with: $0.path) }
-            .first(where: { $0 })
-            ?? false
-    }
+// MARK: - Toolbar
 
-    // MARK: - File Paths
+private struct CopilotListToolbar: ToolbarContent {
+    @Environment(NewViewModel.self) private var newModel
+    @Binding var externalRoot: CopilotContent.Item
+    let isAutomaticRunning: Bool
+    let canStart: Bool
+    let startAction: () -> Void
+    let stopAction: () -> Void
 
-    private var bundledCopilots: [URL] { bundledDirectory.copilots }
-
-    private var bundledDirectory: URL {
-        Bundle.main.resourceURL!
-            .appendingPathComponent("resource")
-            .appendingPathComponent("copilot")
-    }
-
-    private var externalDirectory: URL {
-        let directory = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("copilot")
-
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try? FileManager.default.createDirectory(
-                at: directory, withIntermediateDirectories: true)
+    var body: some ToolbarContent {
+        ToolbarItemGroup {
+            Button(action: deleteSelectedCopilot) {
+                Label("移除", systemImage: "trash")
+            }
+            .help("移除作业")
+            .disabled(!canDeleteCopilot)
+            .keyboardShortcut(.delete, modifiers: [.command])
         }
 
-        return directory
+        ToolbarItemGroup {
+            switch (newModel.status, isAutomaticRunning) {
+            case (.pending, false):
+                Button(action: {}) {
+                    ProgressView().controlSize(.small)
+                }
+                .disabled(true)
+            case (.pending, true), (.busy, _), (.idle, true):
+                Button(action: stopAction) {
+                    Label("停止", systemImage: "stop.fill")
+                }
+                .help("停止")
+            case (.idle, false):
+                Button(action: startAction) {
+                    Label("开始", systemImage: "play.fill")
+                }
+                .help("开始")
+                .disabled(!canStart)
+            }
+        }
     }
 
-    private var recordingDirectory: URL {
-        FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("cache")
-            .appendingPathComponent("CombatRecord")
+    private var canDeleteCopilot: Bool {
+        if newModel.copilot.category == .list { return false }
+        return newModel.copilot.selection?.url.isManagedCopilot ?? false
+    }
+
+    private func deleteSelectedCopilot() {
+        guard let selection = newModel.copilot.selection?.url else { return }
+        let nextSelection = externalRoot.possibleSibling(of: selection)
+
+        Task.detached {
+            await deleteCopilot(url: selection)
+            let children = try? await externalRoot.children()
+            await MainActor.run {
+                externalRoot.children = children ?? []
+                newModel.copilot.selection = nextSelection.map { .init(url: $0.url, isRaid: nil) }
+            }
+        }
+    }
+
+    @concurrent private func deleteCopilot(url: URL) async {
+        guard url.isManagedCopilot else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
+extension CopilotCategory: Identifiable {
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .bundled: String(localized: "内置")
+        case .external: String(localized: "外部")
+        case .list: String(localized: "列表")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .bundled: "house"
+        case .external: "doc"
+        case .list: "doc.on.doc"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .bundled: .copilotBlue
+        case .external: .copilotGreen
+        case .list: .copilotIndigo
+        }
     }
 }
 
 struct CopilotContent_Previews: PreviewProvider {
     static var previews: some View {
-        CopilotContent(selection: .constant(nil))
-            .environmentObject(MAAViewModel())
+        let viewModel = MAAViewModel()
+        return VStack {
+            CopilotContent()
+        }
+        .frame(maxWidth: 300)
+        .environmentObject(viewModel)
+        .environment(NewViewModel(parent: viewModel))
     }
 }
 
-// MARK: - Value Extensions
+// MARK: - File Paths
 
 extension URL {
-    fileprivate var copilots: [URL] {
-        guard
-            let urls = try? FileManager.default.contentsOfDirectory(
-                at: self,
-                includingPropertiesForKeys: [.contentTypeKey],
-                options: .skipsHiddenFiles)
-        else { return [] }
+    static let bundledCopilotDirectory = Bundle.main.resourceURL!
+        .appending(path: "resource/")
+        .appending(path: "copilot/")
 
-        return urls.filter { url in
-            let value = try? url.resourceValues(forKeys: [.contentTypeKey])
-            return value?.contentType == .json
-        }
-        .sorted { lhs, rhs in
-            lhs.lastPathComponent < rhs.lastPathComponent
-        }
+    static let externalCopilotDirectory = FileManager.default
+        .urls(for: .documentDirectory, in: .userDomainMask)
+        .first!
+        .appending(path: "copilot/")
+}
+
+extension URL {
+    fileprivate var isManagedCopilot: Bool {
+        path.starts(with: URL.externalCopilotDirectory.path)
     }
 }
 
-extension Set where Element == URL {
-    fileprivate var urls: [URL] { sorted { $0.lastPathComponent < $1.lastPathComponent } }
-}
-
-// MARK: - Download Model
-
-private struct CopilotResponse: Codable {
-    let data: CopilotData
-
-    struct CopilotData: Codable {
-        let content: String
+extension CopilotContext {
+    var isReady: Bool {
+        if category == .list {
+            return copilotSet != nil && !copilotList.isEmpty
+        }
+        if case .copilot = content { return true }
+        return false
     }
 }
 
-// MARK: - Convenience Methods
+extension CopilotContent.Item {
+    func possibleSibling(of url: URL) -> Self? {
+        if self.url == url { return nil }
+        var searchStack = [self]
 
-extension NSItemProvider {
-    @MainActor fileprivate func loadURL() async throws -> URL {
-        let handle = ProgressActor()
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let progress = loadObject(ofClass: URL.self) { object, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                        return
+        while !searchStack.isEmpty {
+            let current = searchStack.removeLast()
+            if let children = current.children {
+                for index in children.indices {
+                    let item = children[index]
+                    if item.url == url {
+                        let nextIndex = children.index(after: index)
+                        if nextIndex != children.endIndex { return children[nextIndex] }
+                        if index != children.startIndex { return children[children.index(before: index)] }
+                        return nil
                     }
-
-                    guard let object else {
-                        continuation.resume(throwing: MAAError.emptyItemObject)
-                        return
-                    }
-
-                    continuation.resume(returning: object)
-                }
-
-                Task {
-                    await handle.bind(progress: progress)
+                    if item.children != nil { searchStack.append(item) }
                 }
             }
-        } onCancel: {
-            Task {
-                await handle.cancel()
-            }
         }
+        return nil
     }
 }
 
-private actor ProgressActor {
-    private var progress: Progress?
-    private var cancelled = false
-
-    func bind(progress: Progress) {
-        guard !cancelled else { return }
-        self.progress = progress
-        progress.resume()
+extension FileManager {
+    func copyCopilotToExternalDirectory(at url: URL) throws -> URL {
+        let dest = try externalCopilotURL(for: url)
+        try FileManager.default.copyItemOverwriting(at: url, to: dest)
+        return dest
     }
 
-    func cancel() {
-        cancelled = true
-        progress?.cancel()
+    func moveCopilotToExternalDirectory(at url: URL) throws -> URL {
+        let dest = try externalCopilotURL(for: url)
+        try FileManager.default.moveItemOverwriting(at: url, to: dest)
+        return dest
+    }
+
+    private func externalCopilotURL(for url: URL) throws -> URL {
+        try createDirectory(at: .externalCopilotDirectory, withIntermediateDirectories: true)
+        return URL.externalCopilotDirectory.appending(path: url.lastPathComponent)
     }
 }

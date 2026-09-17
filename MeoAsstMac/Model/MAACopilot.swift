@@ -13,6 +13,7 @@ struct MAACopilot: Codable, Equatable {
     let groups: [Group]?
     let minimum_required: String
     let doc: Documentation?
+    let difficulty: Int?
 
     // MARK: SSS
 
@@ -86,8 +87,9 @@ extension MAACopilot {
     }
 
     static let stageCodes: [String: String] = {
-        guard let url = Bundle.main.resourceURL?
-            .appendingPathComponent("resource/stages.json"),
+        guard
+            let url = Bundle.main.resourceURL?
+                .appendingPathComponent("resource/stages.json"),
             let data = try? Data(contentsOf: url),
             let stages = try? JSONDecoder().decode([StageCode].self, from: data)
         else { return [:] }
@@ -96,8 +98,9 @@ extension MAACopilot {
     }()
 
     static let stageIdByCode: [String: String] = {
-        guard let url = Bundle.main.resourceURL?
-            .appendingPathComponent("resource/stages.json"),
+        guard
+            let url = Bundle.main.resourceURL?
+                .appendingPathComponent("resource/stages.json"),
             let data = try? Data(contentsOf: url),
             let stages = try? JSONDecoder().decode([StageCode].self, from: data)
         else { return [:] }
@@ -123,13 +126,15 @@ struct MainStoryStage: Codable, Hashable, Identifiable {
     var id: String { stageId }
 
     static let all: [Self] = {
-        guard let url = Bundle.main.resourceURL?
-            .appendingPathComponent("resource/stages.json"),
+        guard
+            let url = Bundle.main.resourceURL?
+                .appendingPathComponent("resource/stages.json"),
             let data = try? Data(contentsOf: url),
             let stages = try? JSONDecoder().decode([Self].self, from: data)
         else { return [] }
 
-        return stages
+        return
+            stages
             .filter {
                 $0.apCost > 0
                     && ($0.stageId.range(of: #"^main_[0-9]{2}-[0-9]{2}$"#, options: .regularExpression) != nil
@@ -195,12 +200,105 @@ struct ResourceStageLine: Identifiable, Hashable {
     ]
 
     private static let stageByCode: [String: Stage] = {
-        guard let url = Bundle.main.resourceURL?
-            .appendingPathComponent("resource/stages.json"),
+        guard
+            let url = Bundle.main.resourceURL?
+                .appendingPathComponent("resource/stages.json"),
             let data = try? Data(contentsOf: url),
             let stages = try? JSONDecoder().decode([Stage].self, from: data)
         else { return [:] }
 
         return Dictionary(stages.map { ($0.code, $0) }, uniquingKeysWith: { first, _ in first })
     }()
+}
+
+extension MAACopilot {
+    static func download(id: Int, toDirectory directory: URL) async throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let file = directory.appending(path: "\(id)")
+            .appendingPathExtension("json")
+
+        let url = URL(string: "https://prts.maa.plus/copilot/get/\(id)")!
+        let (data, _) = try await URLSession.shared.data(from: url)
+
+        struct Content: Codable {
+            let data: CopilotData
+
+            struct CopilotData: Codable {
+                let content: String
+            }
+        }
+
+        let content = try JSONDecoder().decode(Content.self, from: data)
+        try content.data.content.write(toFile: file.path, atomically: true, encoding: .utf8)
+
+        return file
+    }
+}
+
+struct CopilotSetData: Codable, Hashable {
+    let name: String
+    let description: String
+    let copilot_ids: [Int]
+}
+
+extension CopilotSetData {
+    init?(atDirectory url: URL) {
+        guard url.isDirectory else { return nil }
+        let setID = url.lastPathComponent
+        let metaURL = url.appending(path: ".\(setID).json")
+        do {
+            let data = try Data(contentsOf: metaURL)
+            self = try JSONDecoder().decode(CopilotSetData.self, from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    static func download(id setID: Int, progress: Progress?) async throws -> URL {
+        let url = URL(string: "https://prts.maa.plus/set/get?id=\(setID)")!
+        let (data, _) = try await URLSession.shared.data(from: url)
+
+        struct Content: Codable {
+            let data: CopilotSetData
+        }
+
+        let content = try JSONDecoder().decode(Content.self, from: data)
+
+        let directory = URL.externalCopilotDirectory
+            .appending(path: "s\(setID)/")
+
+        progress?.totalUnitCount = Int64(content.data.copilot_ids.count)
+        progress?.completedUnitCount = 0
+
+        try await withThrowingTaskGroup { group in
+            var ids = content.data.copilot_ids.makeIterator()
+            // Limit to 8 concurrent downloads
+            for _ in 0..<8 {
+                guard let id = ids.next() else { break }
+                group.addTask {
+                    try await MAACopilot.download(id: id, toDirectory: directory)
+                }
+            }
+            while (try await group.next()) != nil {
+                progress?.completedUnitCount += 1
+                if let id = ids.next() {
+                    let added = group.addTaskUnlessCancelled {
+                        try await MAACopilot.download(id: id, toDirectory: directory)
+                    }
+                    if !added {
+                        throw CancellationError()
+                    }
+                }
+            }
+        }
+
+        let file = directory.appending(path: ".s\(setID)")
+            .appendingPathExtension("json")
+
+        let contentData = try JSONEncoder().encode(content.data)
+        try contentData.write(to: file, options: .atomic)
+
+        return directory
+    }
 }

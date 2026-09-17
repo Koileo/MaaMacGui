@@ -12,7 +12,7 @@ struct FightConfiguration: MAATaskConfiguration {
 
     var stage: String
     var medicine: Int?
-    var expiring_medicine: Int?
+    var medicine_expire_days: Int
     var stone: Int?
     var times: Int?
     var series: Int?
@@ -65,8 +65,8 @@ struct FightConfiguration: MAATaskConfiguration {
     }
 
     // 掉落物品列表
-    static var dropItems: [(id: String, item: DropItem)] = []
-    static var id2index: [String: Int] = [:]  // (id -> idx of dropItems)
+    @MainActor static var dropItems: [(id: String, item: DropItem)] = []
+    @MainActor static var id2index: [String: Int] = [:]  // (id -> idx of dropItems)
     static let _excludedValues = Set([
         3213, 3223, 3233, 3243,  // 双芯片
         3253, 3263, 3273, 3283,  // 双芯片
@@ -82,7 +82,7 @@ struct FightConfiguration: MAATaskConfiguration {
         30155,  // 烧结核凝晶
     ])
 
-    static func initDropItems(_ language: String) throws {
+    @MainActor static func initDropItems(_ language: String) throws {
         if !dropItems.isEmpty { return }
         let local: String? =
             switch language {
@@ -126,12 +126,22 @@ struct DropItem: Codable, Equatable {
     let usage: String?
 }
 
+private enum LegacyCodingKeys: String, CodingKey {
+    case expiring_medicine
+}
+
 extension FightConfiguration {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.stage = try container.decodeIfPresent(String.self, forKey: .stage) ?? ""
         self.medicine = try container.decodeIfPresent(Int.self, forKey: .medicine)
-        self.expiring_medicine = try container.decodeIfPresent(Int.self, forKey: .expiring_medicine)
+        if let days = try container.decodeIfPresent(Int.self, forKey: .medicine_expire_days) {
+            medicine_expire_days = days
+        } else {
+            let legacyContainer = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            let medicine = try legacyContainer.decodeIfPresent(Int.self, forKey: .expiring_medicine)
+            medicine_expire_days = (medicine ?? 0) > 0 ? 2 : 0
+        }
         self.stone = try container.decodeIfPresent(Int.self, forKey: .stone)
         self.times = try container.decodeIfPresent(Int.self, forKey: .times)
         self.series = try container.decodeIfPresent(Int.self, forKey: .series)
@@ -141,5 +151,15 @@ extension FightConfiguration {
         self.server = try container.decodeIfPresent(String.self, forKey: .server) ?? "CN"
         self.client_type = try container.decodeIfPresent(String.self, forKey: .client_type) ?? ""
         self.DrGrandet = try container.decodeIfPresent(Bool.self, forKey: .DrGrandet) ?? false
+    }
+}
+
+extension FightConfiguration {
+    var localizedExpiry: LocalizedStringResource {
+        switch medicine_expire_days {
+        case 0: "不启用"
+        case 1: "24小时内"
+        case let d: "\(d - 1)天内"
+        }
     }
 }
