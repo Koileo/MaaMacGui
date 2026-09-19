@@ -96,8 +96,7 @@ enum OperatorRosterStore {
             guard addStatus == errSecSuccess else {
                 throw PRTSPlusError.keychain(addStatus)
             }
-        }
-        else if updateStatus != errSecSuccess {
+        } else if updateStatus != errSecSuccess {
             throw PRTSPlusError.keychain(updateStatus)
         }
     }
@@ -338,8 +337,7 @@ enum PRTSPlusClient {
         let response: URLResponse
         do {
             (data, response) = try await URLSession.shared.data(for: request)
-        }
-        catch {
+        } catch {
             throw PRTSPlusError.network(error)
         }
 
@@ -353,7 +351,7 @@ enum PRTSPlusClient {
             throw PRTSPlusError.invalidResponse
         }
         guard payload.code == 200 else {
-            throw PRTSPlusError.api(payload.message ?? "同步干员数据失败")
+            throw PRTSPlusError.api(payload.message ?? payload.msg ?? "同步干员数据失败")
         }
 
         let owned = parseOwnedOperators(payload.data ?? [])
@@ -363,7 +361,9 @@ enum PRTSPlusClient {
 
     // MARK: - Fallback operations
 
-    static func fallbacks(for copilot: MAACopilot, excluding: Set<Int>, ownedOperatorNames: Set<String>) async throws -> [URL] {
+    static func fallbacks(for copilot: MAACopilot, excluding: Set<Int>, ownedOperatorNames: Set<String>) async throws
+        -> [URL]
+    {
         try await candidates(
             for: copilot.stage_name,
             excluding: excluding,
@@ -386,10 +386,12 @@ enum PRTSPlusClient {
             while page <= 5 && summaries.count < maxQueryResults {
                 let queryData = try await query(stageName: stageName, keyword: keyword, page: page)
                 guard !queryData.data.isEmpty else { break }
-                if page == 1 && !queryData.data.contains(where: { item in
-                    item.content.localizedCaseInsensitiveContains(keyword)
-                        || (requestedCode != nil && item.content.localizedCaseInsensitiveContains(requestedCode!))
-                }) {
+                if page == 1
+                    && !queryData.data.contains(where: { item in
+                        item.content.localizedCaseInsensitiveContains(keyword)
+                            || (requestedCode != nil && item.content.localizedCaseInsensitiveContains(requestedCode!))
+                    })
+                {
                     break
                 }
                 for item in queryData.data {
@@ -424,14 +426,20 @@ enum PRTSPlusClient {
         let targetCandidates = nonExcluded.isEmpty ? validCandidates : nonExcluded
 
         let ownedMap = ownedOperatorNames.isEmpty ? nil : Self.ownedOperatorMap
-        var ranked: [(id: Int, stageRank: Int, mode: MatchMode, hotScore: Double, uploadTime: String, training: [String])] = []
+        var ranked:
+            [(id: Int, stageRank: Int, mode: MatchMode, hotScore: Double, uploadTime: String, training: [String])] = []
         for item in targetCandidates {
-            let evaluation = ownedMap.map { Self.matchEvaluation(for: item.content, owned: $0) }
+            let evaluation =
+                ownedMap.map { Self.matchEvaluation(for: item.content, owned: $0) }
                 ?? MatchEvaluation(mode: .ready, training: [])
             guard evaluation.mode != .blocked else {
                 continue
             }
-            ranked.append((item.summary.id, item.stageRank, evaluation.mode, item.summary.hotScore ?? 0, item.summary.uploadTime, evaluation.training))
+            ranked.append(
+                (
+                    item.summary.id, item.stageRank, evaluation.mode, item.summary.hotScore ?? 0,
+                    item.summary.uploadTime, evaluation.training
+                ))
         }
 
         ranked.sort { lhs, rhs in
@@ -463,7 +471,8 @@ enum PRTSPlusClient {
             }
         }
         if urls.isEmpty {
-            let training = ranked
+            let training =
+                ranked
                 .filter { $0.mode == .train }
                 .flatMap(\.training)
             if !training.isEmpty {
@@ -491,8 +500,7 @@ enum PRTSPlusClient {
         let response: URLResponse
         do {
             (data, response) = try await URLSession.shared.data(for: request)
-        }
-        catch {
+        } catch {
             throw PRTSPlusError.network(error)
         }
 
@@ -572,7 +580,8 @@ enum PRTSPlusClient {
         // 2. Check matching visible stage code
         let requestedCode = MAACopilot.stageCodes[requested] ?? requested
         let candidateCode = MAACopilot.stageCodes[candidate] ?? candidate
-        let cleanCandidateCode = candidateCode
+        let cleanCandidateCode =
+            candidateCode
             .replacingOccurrences(
                 of: #"-?(NORMAL|HARD|EASY|磨难|标准|险地|常规)$"#,
                 with: "",
@@ -613,8 +622,7 @@ enum PRTSPlusClient {
         let response: URLResponse
         do {
             (data, response) = try await URLSession.shared.data(from: url)
-        }
-        catch {
+        } catch {
             throw PRTSPlusError.network(error)
         }
 
@@ -654,15 +662,15 @@ enum PRTSPlusClient {
     }
 
     static func downloadCopilotSet(id: Int) async throws -> [URL] {
-        var components = URLComponents(url: apiBaseURL.appendingPathComponent("set/get"), resolvingAgainstBaseURL: false)!
+        var components = URLComponents(
+            url: apiBaseURL.appendingPathComponent("set/get"), resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "id", value: String(id))]
 
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await URLSession.shared.data(from: components.url!)
-        }
-        catch {
+        } catch {
             throw PRTSPlusError.network(error)
         }
 
@@ -756,15 +764,16 @@ enum PRTSPlusClient {
                 moduleLevels[module] = equipLevel
             }
 
-            result.append(OwnedOperator(
-                name: info.name,
-                rarity: info.rarity,
-                elite: max(0, record.evolvePhase ?? 0),
-                level: level,
-                mainSkillLevel: record.mainSkillLevel,
-                masteryLevels: (record.skills ?? []).map { max(0, $0.level ?? 0) },
-                moduleLevels: moduleLevels
-            ))
+            result.append(
+                OwnedOperator(
+                    name: info.name,
+                    rarity: info.rarity,
+                    elite: max(0, record.evolvePhase ?? 0),
+                    level: level,
+                    mainSkillLevel: record.mainSkillLevel,
+                    masteryLevels: (record.skills ?? []).map { max(0, $0.level ?? 0) },
+                    moduleLevels: moduleLevels
+                ))
         }
         return result
     }
@@ -823,12 +832,12 @@ enum PRTSPlusClient {
                 guard let skillIndex = oper.skill, skillIndex >= 1 else {
                     return false
                 }
-                let mastery = owned.masteryLevels.indices.contains(skillIndex - 1) ? owned.masteryLevels[skillIndex - 1] : 0
+                let mastery =
+                    owned.masteryLevels.indices.contains(skillIndex - 1) ? owned.masteryLevels[skillIndex - 1] : 0
                 if mastery < skillLevel - 7 {
                     return false
                 }
-            }
-            else if (owned.mainSkillLevel ?? 0) < skillLevel {
+            } else if (owned.mainSkillLevel ?? 0) < skillLevel {
                 return false
             }
         }
@@ -862,8 +871,7 @@ enum PRTSPlusClient {
                 if !meetsRequirement(oper, owned: ownedOperator) {
                     trainingSlots.append(oper.name)
                 }
-            }
-            else {
+            } else {
                 missingSlots.append(oper.name)
             }
         }
@@ -932,8 +940,7 @@ enum BarkClient {
         let response: URLResponse
         do {
             (data, response) = try await URLSession.shared.data(for: request)
-        }
-        catch {
+        } catch {
             throw PRTSPlusError.network(error)
         }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -951,6 +958,7 @@ enum BarkClient {
 private struct YituliuResponse: Decodable {
     let code: Int
     let message: String?
+    let msg: String?
     let data: [YituliuRecord]?
 }
 
