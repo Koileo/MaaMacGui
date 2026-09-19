@@ -69,6 +69,7 @@ struct CopilotContent: View {
     @State private var importingCopilotSet = false
     @State private var barkTestStatus: String?
     @State private var testingBark = false
+    @AppStorage("MAAMainStoryDifficulty") private var mainStoryDifficultyRaw = MainStoryDifficulty.normal.rawValue
     @AppStorage("MAAMainStoryStart") private var mainStoryStart = "main_05-01"
     @AppStorage("MAAMainStoryEnd") private var mainStoryEnd = MainStoryStage.all.last?.id ?? ""
     @AppStorage("MAAResourceStageLine") private var resourceStageLine = ResourceStageLine.all.first?.id ?? "CE"
@@ -78,6 +79,14 @@ struct CopilotContent: View {
     @AppStorage("MAAMainStoryBarkEndpoint") private var barkEndpoint = ""
     @State private var mainStoryProgress = ""
     @State private var mainStoryTask: Task<Void, Never>?
+
+    private var mainStoryDifficulty: MainStoryDifficulty {
+        MainStoryDifficulty(rawValue: mainStoryDifficultyRaw) ?? .normal
+    }
+
+    private var mainStoryStages: [MainStoryStage] {
+        MainStoryStage.stages(for: mainStoryDifficulty)
+    }
 
     var body: some View {
         @Bindable var context = newModel.copilot
@@ -190,6 +199,7 @@ struct CopilotContent: View {
             ownedOperatorNames = OperatorRosterStore.names
             operatorMatchingEnabled = OperatorRosterStore.matchingEnabled
             failedCopilotCount = FailedCopilotStore.ids.count
+            normalizeMainStoryRange()
         }
         .onDrop(of: [.json], isTargeted: .none, perform: addCopilots)
         .sheet(isPresented: $showOperatorSettings, content: operatorSettings)
@@ -254,19 +264,30 @@ struct CopilotContent: View {
             .pickerStyle(.segmented)
 
             if battleMode == .mainStory {
+                Picker("难度", selection: $mainStoryDifficultyRaw) {
+                    ForEach(MainStoryDifficulty.allCases.filter { !MainStoryStage.stages(for: $0).isEmpty }) {
+                        difficulty in
+                        Text(difficulty.title).tag(difficulty.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: mainStoryDifficultyRaw) {
+                    normalizeMainStoryRange()
+                }
+
                 HStack {
                     Picker("起始", selection: $mainStoryStart) {
-                        ForEach(MainStoryStage.all) { stage in
+                        ForEach(mainStoryStages) { stage in
                             Text(stage.code).tag(stage.id)
                         }
                     }
                     Picker("结束", selection: $mainStoryEnd) {
-                        ForEach(MainStoryStage.all) { stage in
+                        ForEach(mainStoryStages) { stage in
                             Text(stage.code).tag(stage.id)
                         }
                     }
                 }
-                Text("从所选起点开始推进；不会读取账号的历史通关记录。")
+                Text("从所选难度的起点开始推进；不会读取账号的历史通关记录。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -353,6 +374,31 @@ struct CopilotContent: View {
     }
 
     // MARK: - Actions
+
+    private func normalizeMainStoryRange() {
+        guard let first = mainStoryStages.first, let last = mainStoryStages.last else { return }
+
+        func remap(_ stageID: String, fallback: String) -> String {
+            if mainStoryStages.contains(where: { $0.id == stageID }) {
+                return stageID
+            }
+            if let variantID = MainStoryStage.variantID(for: stageID, difficulty: mainStoryDifficulty) {
+                return variantID
+            }
+            return fallback
+        }
+
+        mainStoryStart = remap(mainStoryStart, fallback: first.id)
+        mainStoryEnd = remap(mainStoryEnd, fallback: last.id)
+
+        if let startIndex = mainStoryStages.firstIndex(where: { $0.id == mainStoryStart }),
+            let endIndex = mainStoryStages.firstIndex(where: { $0.id == mainStoryEnd }),
+            startIndex > endIndex
+        {
+            mainStoryStart = first.id
+            mainStoryEnd = last.id
+        }
+    }
 
     private func refreshItem(at keyPath: KeyPath<Self, Binding<Item>>) async {
         let binding = self[keyPath: keyPath]
@@ -468,16 +514,19 @@ struct CopilotContent: View {
 
     @MainActor private func runMainStory() async {
         do {
-            guard let start = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryStart }),
-                let end = MainStoryStage.all.firstIndex(where: { $0.id == mainStoryEnd }),
+            guard let start = mainStoryStages.firstIndex(where: { $0.id == mainStoryStart }),
+                let end = mainStoryStages.firstIndex(where: { $0.id == mainStoryEnd }),
                 start <= end
             else {
                 throw PRTSPlusError.api("主线关卡范围无效")
             }
 
-            let stages = Array(MainStoryStage.all[start...end]).map { ($0.stageId, $0.code) }
+            let stages = Array(mainStoryStages[start...end]).map { ($0.stageId, $0.code) }
             let battleCount = automaticStageBattleCount
-            try await runAutomaticStages(stages, battleCount: battleCount)
+            try await runAutomaticStages(
+                stages,
+                battleCount: battleCount,
+                isRaid: mainStoryDifficulty == .tough)
             mainStoryProgress = "已完成 \(stages.count) 个主线关卡，共 \(stages.count * battleCount) 次战斗"
             mainStoryTask = nil
         } catch {
@@ -525,7 +574,8 @@ struct CopilotContent: View {
 
     @MainActor private func runAutomaticStages(
         _ stages: [(id: String, code: String)],
-        battleCount: Int
+        battleCount: Int,
+        isRaid: Bool = false
     ) async throws {
         let names = operatorMatchingEnabled ? ownedOperatorNames : []
         for (index, stage) in stages.enumerated() {
@@ -571,7 +621,7 @@ struct CopilotContent: View {
                     .init(
                         filename: url.path(percentEncoded: false),
                         nav_name_override: stage.code,
-                        is_raid: false)
+                        is_raid: isRaid)
                 ]
                 configuration.switch_copilot_on_failure = true
                 mainStoryProgress =

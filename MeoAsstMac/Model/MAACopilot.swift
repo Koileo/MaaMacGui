@@ -118,6 +118,36 @@ extension MAACopilot {
     }
 }
 
+enum MainStoryDifficulty: String, CaseIterable, Identifiable {
+    case normal
+    case tough
+    case easy
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .normal:
+            return "普通"
+        case .tough:
+            return "磨难"
+        case .easy:
+            return "简单"
+        }
+    }
+
+    fileprivate var stagePrefix: String {
+        switch self {
+        case .normal:
+            return "main_"
+        case .tough:
+            return "tough_"
+        case .easy:
+            return "easy_"
+        }
+    }
+}
+
 struct MainStoryStage: Codable, Hashable, Identifiable {
     let apCost: Int
     let code: String
@@ -126,6 +156,31 @@ struct MainStoryStage: Codable, Hashable, Identifiable {
     var id: String { stageId }
 
     static let all: [Self] = {
+        resourceStages
+            .filter {
+                $0.apCost > 0
+                    && ($0.stageId.range(of: #"^main_[0-9]{2}-[0-9]{2}$"#, options: .regularExpression) != nil
+                        || $0.code.range(of: #"^S[0-9]+-[0-9]+$"#, options: .regularExpression) != nil)
+            }
+            .sorted { sortKey($0.code).lexicographicallyPrecedes(sortKey($1.code)) }
+    }()
+
+    static func stages(for difficulty: MainStoryDifficulty) -> [Self] {
+        guard difficulty != .normal else { return all }
+
+        return all.compactMap { stage in
+            guard let variantID = variantID(for: stage.stageId, difficulty: difficulty) else { return nil }
+            return stagesByID[variantID]
+        }
+    }
+
+    static func variantID(for stageID: String, difficulty: MainStoryDifficulty) -> String? {
+        guard let suffix = stageID.split(separator: "_", maxSplits: 1).last else { return nil }
+        let variantID = difficulty.stagePrefix + suffix
+        return stagesByID[variantID] == nil ? nil : variantID
+    }
+
+    private static let resourceStages: [Self] = {
         guard
             let url = Bundle.main.resourceURL?
                 .appendingPathComponent("resource/stages.json"),
@@ -133,14 +188,11 @@ struct MainStoryStage: Codable, Hashable, Identifiable {
             let stages = try? JSONDecoder().decode([Self].self, from: data)
         else { return [] }
 
-        return
-            stages
-            .filter {
-                $0.apCost > 0
-                    && ($0.stageId.range(of: #"^main_[0-9]{2}-[0-9]{2}$"#, options: .regularExpression) != nil
-                        || $0.code.range(of: #"^S[0-9]+-[0-9]+$"#, options: .regularExpression) != nil)
-            }
-            .sorted { sortKey($0.code).lexicographicallyPrecedes(sortKey($1.code)) }
+        return stages
+    }()
+
+    private static let stagesByID: [String: Self] = {
+        Dictionary(resourceStages.map { ($0.stageId, $0) }, uniquingKeysWith: { first, _ in first })
     }()
 
     private static func sortKey(_ code: String) -> [Int] {
