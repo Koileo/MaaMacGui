@@ -154,6 +154,9 @@ struct MainStoryStage: Codable, Hashable, Identifiable {
     let stageId: String
 
     var id: String { stageId }
+    var chapter: Int? {
+        Int(code.prefix { $0 != "-" }.filter { $0.isNumber })
+    }
 
     static let all: [Self] = {
         resourceStages

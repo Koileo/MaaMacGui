@@ -88,6 +88,36 @@ struct CopilotContent: View {
         MainStoryStage.stages(for: mainStoryDifficulty)
     }
 
+    private var mainStoryChapters: [Int] {
+        Array(Set(mainStoryStages.compactMap(\.chapter))).sorted()
+    }
+
+    private var mainStoryStartChapter: Binding<Int> {
+        Binding(
+            get: { mainStoryStage(withID: mainStoryStart)?.chapter ?? mainStoryChapters.first ?? 0 },
+            set: { chapter in
+                guard let stage = mainStoryStages(in: chapter).first else { return }
+                setMainStoryStart(stage.id)
+            })
+    }
+
+    private var mainStoryEndChapter: Binding<Int> {
+        Binding(
+            get: { mainStoryStage(withID: mainStoryEnd)?.chapter ?? mainStoryChapters.last ?? 0 },
+            set: { chapter in
+                guard let stage = mainStoryStages(in: chapter).last else { return }
+                setMainStoryEnd(stage.id)
+            })
+    }
+
+    private var mainStoryStartSelection: Binding<String> {
+        Binding(get: { mainStoryStart }, set: { setMainStoryStart($0) })
+    }
+
+    private var mainStoryEndSelection: Binding<String> {
+        Binding(get: { mainStoryEnd }, set: { setMainStoryEnd($0) })
+    }
+
     var body: some View {
         @Bindable var context = newModel.copilot
         VStack(spacing: 0) {
@@ -276,16 +306,40 @@ struct CopilotContent: View {
                 }
 
                 HStack {
-                    Picker("起始", selection: $mainStoryStart) {
-                        ForEach(mainStoryStages) { stage in
+                    Text("起始")
+                        .frame(width: 32, alignment: .trailing)
+                    Picker("起始章节", selection: mainStoryStartChapter) {
+                        ForEach(mainStoryChapters, id: \.self) { chapter in
+                            Text("第\(chapter)章").tag(chapter)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    Picker("起始关卡", selection: mainStoryStartSelection) {
+                        ForEach(mainStoryStages(in: mainStoryStartChapter.wrappedValue)) { stage in
                             Text(stage.code).tag(stage.id)
                         }
                     }
-                    Picker("结束", selection: $mainStoryEnd) {
-                        ForEach(mainStoryStages) { stage in
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                }
+                HStack {
+                    Text("结束")
+                        .frame(width: 32, alignment: .trailing)
+                    Picker("结束章节", selection: mainStoryEndChapter) {
+                        ForEach(mainStoryChapters, id: \.self) { chapter in
+                            Text("第\(chapter)章").tag(chapter)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    Picker("结束关卡", selection: mainStoryEndSelection) {
+                        ForEach(mainStoryStages(in: mainStoryEndChapter.wrappedValue)) { stage in
                             Text(stage.code).tag(stage.id)
                         }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
                 }
                 Text("从所选难度的起点开始推进；不会读取账号的历史通关记录。")
                     .font(.caption)
@@ -395,8 +449,31 @@ struct CopilotContent: View {
             let endIndex = mainStoryStages.firstIndex(where: { $0.id == mainStoryEnd }),
             startIndex > endIndex
         {
-            mainStoryStart = first.id
-            mainStoryEnd = last.id
+            mainStoryEnd = mainStoryStart
+        }
+    }
+
+    private func mainStoryStage(withID id: String) -> MainStoryStage? {
+        mainStoryStages.first { $0.id == id }
+    }
+
+    private func mainStoryStages(in chapter: Int) -> [MainStoryStage] {
+        mainStoryStages.filter { $0.chapter == chapter }
+    }
+
+    private func setMainStoryStart(_ stageID: String) {
+        guard let startIndex = mainStoryStages.firstIndex(where: { $0.id == stageID }) else { return }
+        mainStoryStart = stageID
+        if let endIndex = mainStoryStages.firstIndex(where: { $0.id == mainStoryEnd }), startIndex > endIndex {
+            mainStoryEnd = stageID
+        }
+    }
+
+    private func setMainStoryEnd(_ stageID: String) {
+        guard let endIndex = mainStoryStages.firstIndex(where: { $0.id == stageID }) else { return }
+        mainStoryEnd = stageID
+        if let startIndex = mainStoryStages.firstIndex(where: { $0.id == mainStoryStart }), startIndex > endIndex {
+            mainStoryStart = stageID
         }
     }
 

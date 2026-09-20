@@ -200,11 +200,13 @@ extension MAAViewModel {
             try await handle?.apply(options: instanceOptions)
         }
 
-        if await handle?.running == true {
+        let waitedForStop = await handle?.running == true
+        if waitedForStop {
+            logInfo("正在等待核心停止，最长等待 60 秒...")
             try? await handle?.stop()
-            for _ in 0..<30 {
+            for _ in 0..<600 {
                 if await handle?.running == false { break }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                try await Task.sleep(nanoseconds: 100_000_000)
             }
         }
 
@@ -213,6 +215,9 @@ extension MAAViewModel {
         }
 
         logStore?.clearLogs()
+        if waitedForStop {
+            logInfo("核心已停止，继续启动新任务")
+        }
         taskIDMap.removeAll()
         taskStatus.removeAll()
 
@@ -275,7 +280,7 @@ extension MAAViewModel {
     }
 
     func waitUntilCopilotCompleted() async throws -> Bool {
-        for _ in 0..<50 {
+        for _ in 0..<100 {
             try Task.checkCancellation()
             if await handle?.running == true {
                 break
